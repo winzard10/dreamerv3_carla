@@ -1,0 +1,24 @@
+# --- Core Simulator API ---
+carla==0.9.16
+
+# --- Deep Learning (CUDA 12.1) ---
+# Note: Use the --index-url for automated installs of these specific binaries
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+torchaudio==2.5.1+cu121
+
+# --- Numerical & Data ---
+numpy<2.0.0
+scipy
+pandas
+
+# --- Reinforcement Learning ---
+gymnasium
+pygame
+tqdm
+tensorboard
+
+# --- Perception & Math ---
+opencv-python
+pillow
+sympy

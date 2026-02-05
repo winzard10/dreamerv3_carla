@@ -1,0 +1,15 @@
+# Ignore the environment
+venv_rl/
+
+# Ignore the CARLA link/folder
+carla_sim/
+CARLA_0.9.16/
+
+# Ignore Python cache and local files
+__pycache__/
+*.py[cod]
+.env
+
+# Ignore large data/logs
+logs/
+data/
