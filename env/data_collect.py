@@ -1,41 +1,94 @@
+import os
 import carla
 import numpy as np
+import torch
 from env.carla_wrapper import CarlaEnv
 
-def get_pid_control(vehicle, waypoint):
-    # Calculate steering using a simple lateral PID
-    v_vec = vehicle.get_transform().get_forward_vector()
-    w_vec = waypoint.transform.location - vehicle.get_location()
-    
-    # Dot product and cross product for angle
-    dot = v_vec.x * w_vec.x + v_vec.y * w_vec.y
-    cross = v_vec.x * w_vec.y - v_vec.y * w_vec.x
-    angle = np.arctan2(cross, dot)
-    
-    # Steering PID constants (K_p = 1.2 is a good starting point)
-    steer = np.clip(1.2 * angle, -1.0, 1.0)
-    return steer
+# Configuration
+SAVE_DIR = "./data/expert_sequences"
+TARGET_STEPS = 5000  # Start with a small batch to test
+SEQ_LEN = 50         # DreamerV3 prefers sequences
 
-def collect_data(steps=10000):
+def run_collection():
+    if not os.path.exists(SAVE_DIR):
+        os.makedirs(SAVE_DIR)
+
     env = CarlaEnv()
     obs = env.reset()
     
-    for i in range(steps):
-        # 1. Get current waypoint from CARLA Map
-        waypoint = env.world.get_map().get_waypoint(env.vehicle.get_location())
+    # Storage for the current sequence
+    current_seq = {
+        "depth": [],
+        "semantic": [],
+        "action": [],
+        "reward": []
+    }
+
+    print(f"Starting data collection for {TARGET_STEPS} steps...")
+
+    for step in range(TARGET_STEPS):
+        # 1. Simple PID-like logic using CARLA Waypoints
+        vehicle_transform = env.vehicle.get_transform()
+        waypoint = env.world.get_map().get_waypoint(vehicle_transform.location)
         next_waypoint = waypoint.next(2.0)[0] # Look 2 meters ahead
         
-        # 2. Calculate PID steering and constant throttle
-        steer = get_pid_control(env.vehicle, next_waypoint)
-        action = [steer, 0.5] # 50% throttle for steady speed
+        # Calculate steering angle
+        v_begin = vehicle_transform.location
+        v_end = v_begin + vehicle_transform.get_forward_vector()
+        v_vec = np.array([v_end.x - v_begin.x, v_end.y - v_begin.y])
         
-        # 3. Step and save to your buffer
+        w_vec = np.array([next_waypoint.transform.location.x - v_begin.x, 
+                          next_waypoint.transform.location.y - v_begin.y])
+        
+        dot = np.dot(v_vec, w_vec) / (np.linalg.norm(v_vec) * np.linalg.norm(w_vec))
+        cross = np.cross(v_vec, w_vec)
+        angle = np.arccos(np.clip(dot, -1.0, 1.0))
+        if cross < 0: angle *= -1
+        
+        # PID Steering + Constant Throttle
+        steer = np.clip(1.5 * angle, -1.0, 1.0)
+        action = np.array([steer, 0.4], dtype=np.float32)
+
+        # 2. Step Environment
         next_obs, reward, done, _ = env.step(action)
-        # (Save code for buffer goes here)
         
+        spectator = env.world.get_spectator()
+        v_transform = env.vehicle.get_transform()
+        
+        # Calculate position (8m back, 4m up)
+        forward_vec = v_transform.get_forward_vector()
+        back_pos = v_transform.location - (forward_vec * 8.0) + carla.Location(z=4.0)
+        
+        # Update camera
+        spectator.set_transform(carla.Transform(back_pos, v_transform.rotation))
+
+        # 3. Save to sequence buffer
+        current_seq["depth"].append(obs["depth"])
+        current_seq["semantic"].append(obs["semantic"])
+        current_seq["action"].append(action)
+        current_seq["reward"].append(reward)
+
+        # 4. If sequence is full, save to disk
+        if len(current_seq["action"]) == SEQ_LEN:
+            seq_idx = len(os.listdir(SAVE_DIR))
+            np.savez_compressed(
+                f"{SAVE_DIR}/seq_{seq_idx}.npz",
+                depth=np.array(current_seq["depth"]),
+                semantic=np.array(current_seq["semantic"]),
+                action=np.array(current_seq["action"]),
+                reward=np.array(current_seq["reward"])
+            )
+            # Reset local sequence
+            for key in current_seq: current_seq[key] = []
+
         obs = next_obs
-        if done: obs = env.reset()
-        if i % 100 == 0: print(f"Collected {i} steps...")
+        
+        if done or step % 500 == 0:
+            print(f"Step {step}/{TARGET_STEPS} | Last Reward: {reward:.2f}")
+            if done: obs = env.reset()
+
+    print(f"Collection complete. Data saved to {SAVE_DIR}")
+    env._cleanup()
 
 if __name__ == "__main__":
-    collect_data()
+    run_collection()

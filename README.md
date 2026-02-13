@@ -1,4 +1,4 @@
-/dreamer-carla
+/rl_car
 ├── /models
 │   ├── encoder.py       # Visual (Depth/Seg) + Vector fusion
 │   ├── rssm.py          # Recurrent State-Space Model (The World Model)
@@ -20,3 +20,20 @@ source venv_rl/bin/activate
 ./carla_sim/CarlaUE4.sh -quality-level=Low
 # Runs off-screen
 ./carla_sim/CarlaUE4.sh -RenderOffScreen
+
+./CarlaUE4.sh -quality-level=Low -benchmark -fps=20
+
+# Check GPU status
+watch -n 1 nvidia-smi
+
+# Run data collect
+python3 -m env.data_collect
+
+# Train
+python3 -m train
+
+# Test
+python3 -m test
+
+# Tensorboard
+tensorboard --logdir=runs

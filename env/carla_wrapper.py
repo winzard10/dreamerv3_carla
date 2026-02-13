@@ -48,7 +48,17 @@ class CarlaEnv(gym.Env):
         self._setup_sensors()
         
         # Tick to initialize data
-        self.world.tick()
+        # Keep ticking until both sensors have sent their first frame
+        max_tries = 100
+        tries = 0
+        
+        while (self.last_data["depth"] is None or self.last_data["semantic"] is None) and tries < max_tries:
+            self.world.tick()
+            tries += 1
+        
+        if tries == max_tries:
+            print("ERROR: Sensors failed to initialize after 100 ticks.")
+        # --------------------------
         return self._get_obs()
 
     def step(self, action):
@@ -110,6 +120,14 @@ class CarlaEnv(gym.Env):
             "semantic": self.last_data["semantic"],
             "vector": np.array([kmh, 0.0, 0.0], dtype=np.float32) # Simplification
         }
+        
+    def _calculate_reward(self):
+        # Basic reward: speed in km/h
+        v = self.vehicle.get_velocity()
+        return 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
+
+    def _check_done(self):
+        return False # Simple test logic
 
     def _cleanup(self):
         # Ensure clean break to avoid crashes
@@ -120,3 +138,43 @@ class CarlaEnv(gym.Env):
             self.vehicle.destroy()
         self.sensors = []
         self.vehicle = None
+
+if __name__ == "__main__":
+    # 1. Initialize environment
+    env = CarlaEnv()
+    try:
+        print("Resetting environment...")
+        obs = env.reset()
+        
+        print(f"Observation shapes:")
+        print(f"- Depth: {obs['depth'].shape}") # Should be (160, 160, 1)
+        print(f"- Semantic: {obs['semantic'].shape}") # Should be (160, 160, 1)
+        
+        for i in range(10):
+            # 2. Take a step (Steer 0.1, Throttle 0.5)
+            action = np.array([0.1, 0.5])
+            obs, reward, done, _ = env.step(action)
+            
+            # 3. Visual Verification using OpenCV
+            # Normalize for display
+            depth_vis = cv2.applyColorMap(obs['depth'], cv2.COLORMAP_JET)
+            # Multiply tags by 10 so they are visible (0-22 is too dark raw)
+            sem_vis = cv2.applyColorMap(obs['semantic'] * 10, cv2.COLORMAP_JET)
+            
+            cv2.imshow("Depth Stream", depth_vis)
+            cv2.imshow("Semantic Stream", sem_vis)
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            
+            print(f"Step {i}: Reward (Speed) = {reward:.2f} km/h")
+            
+    finally:
+        # 4. Clean exit to prevent the "Not Responding" crash
+        print("Cleaning up...")
+        cv2.destroyAllWindows()
+        env._cleanup()
+        # Set back to async before closing script
+        settings = env.world.get_settings()
+        settings.synchronous_mode = False
+        env.world.apply_settings(settings)

@@ -2,68 +2,80 @@ import torch
 import torch.nn as nn
 
 class RSSM(nn.Module):
-    def __init__(self, latent_dim=1024, deter_dim=1024, stoch_dim=32, discrete_dim=32):
+    def __init__(self, hidden_dim=512, state_dim=32, act_dim=2, embed_dim=1024):
         super(RSSM, self).__init__()
-        self.deter_dim = deter_dim
-        self.stoch_dim = stoch_dim
-        self.discrete_dim = discrete_dim
+        self.hidden_dim = hidden_dim
+        self.state_dim = state_dim
         
-        # 1. GRU Cell: The deterministic "memory"
-        # Takes (Action + Stochastic State) and updates the Deterministic State
-        self.gru = nn.GRUCell(latent_dim + (stoch_dim * discrete_dim), deter_dim)
-        
-        # 2. Transition Model: Predicts the NEXT stochastic state (The Imagination)
-        # Takes the current Deterministic State and predicts distribution for next step
-        self.img_prior = nn.Sequential(
-            nn.Linear(deter_dim, 512),
+        self.transition_model = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(512, stoch_dim * discrete_dim)
+            nn.Linear(hidden_dim, state_dim)
         )
         
-        # 3. Representation Model: Corrects the state based on REAL observations
-        # Takes (Deterministic State + Current Observation) and gives a better Stochastic State
-        self.obs_posterior = nn.Sequential(
-            nn.Linear(deter_dim + latent_dim, 512),
+        self.representation_model = nn.Sequential(
+            nn.Linear(hidden_dim + embed_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(512, stoch_dim * discrete_dim)
+            nn.Linear(hidden_dim, state_dim)
+        )
+        
+        self.gru = nn.GRUCell(state_dim + act_dim, hidden_dim)
+        
+        self.reward_model = nn.Sequential(
+            nn.Linear(hidden_dim + state_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, 1)
         )
 
     def get_initial_state(self, batch_size, device):
-        # Initialize the memory (zeros)
-        return (torch.zeros(batch_size, self.deter_dim).to(device),
-                torch.zeros(batch_size, self.stoch_dim, self.discrete_dim).to(device))
+        return torch.zeros(batch_size, self.hidden_dim).to(device)
 
-    def observe(self, embed, action, state):
-        """Used during REAL training with CARLA observations."""
-        deter, stoch = state
-        # Flat stoch for GRU input
-        stoch_flat = stoch.reshape(stoch.shape[0], -1)
-        
-        # Update deterministic state (Memory)
-        deter = self.gru(torch.cat([stoch_flat, action], dim=-1), deter)
-        
-        # Get posterior (The "Now I see it" state)
-        logits = self.obs_posterior(torch.cat([deter, embed], dim=-1))
-        stoch_post = self._sample_stochastic(logits)
-        
-        return deter, stoch_post
+    def predict_reward(self, h, z):
+        state = torch.cat([h, z], dim=-1)
+        return self.reward_model(state)
 
-    def imagine(self, action, state):
-        """Used during IMAGINED training (predicting the future)."""
-        deter, stoch = state
-        stoch_flat = stoch.reshape(stoch.shape[0], -1)
+    def observe_sequence(self, embeds, actions):
+        batch_size, seq_len, _ = embeds.shape
+        device = embeds.device
+        h = torch.zeros(batch_size, self.hidden_dim).to(device)
         
-        deter = self.gru(torch.cat([stoch_flat, action], dim=-1), deter)
+        # We now collect separate lists for h and z
+        post_h, post_z = [], []
+        prior_h, prior_z = [], []
         
-        # Get prior (The "I think this will happen" state)
-        logits = self.img_prior(deter)
-        stoch_prior = self._sample_stochastic(logits)
+        for t in range(seq_len):
+            # 1. Prior (Prediction)
+            prior_z_t = self.transition_model(h)
+            
+            # 2. Posterior (Reality)
+            post_z_t = self.representation_model(torch.cat([h, embeds[:, t]], dim=-1))
+            
+            # Store the state (h, z) used at this timestep
+            post_h.append(h); post_z.append(post_z_t)
+            prior_h.append(h); prior_z.append(prior_z_t)
+            
+            # 3. Update memory for next step
+            h = self.gru(torch.cat([post_z_t, actions[:, t]], dim=-1), h)
         
-        return deter, stoch_prior
+        # Return tuples: (h_seq, z_seq)
+        return (torch.stack(post_h, dim=1), torch.stack(post_z, dim=1)), \
+               (torch.stack(prior_h, dim=1), torch.stack(prior_z, dim=1))
+    
+    def imagine(self, start_h, start_z, actor, horizon=15):
+        h, z = start_h, start_z
+        imag_h, imag_z = [], []
+        
+        for _ in range(horizon):
+            action = actor(h, z)
+            # 1. Update memory using the previous state and action
+            h = self.gru(torch.cat([z, action], dim=-1), h)
+            # 2. Imagine the next stochastic state from that memory
+            z = self.transition_model(h)
+            imag_h.append(h); imag_z.append(z)
+            
+        return torch.stack(imag_h), torch.stack(imag_z)
 
-    def _sample_stochastic(self, logits):
-        # DreamerV3 uses discrete (Categorical) stochastic states for stability
-        logits = logits.view(-1, self.stoch_dim, self.discrete_dim)
-        # Gumbel-Softmax trick for backpropagation through discrete sampling
-        probs = torch.softmax(logits, dim=-1)
-        return probs # In a full implementation, you'd sample or use Straight-Through gradients
+    def kl_loss(self, posteriors, priors, free_nats=1.0): # Added self
+        kl = torch.pow(posteriors - priors, 2).mean()
+        return torch.max(kl, torch.tensor(free_nats).to(kl.device))

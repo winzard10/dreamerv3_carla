@@ -2,25 +2,39 @@ import torch
 import torch.nn as nn
 
 class MultiModalDecoder(nn.Module):
-    def __init__(self, deter_dim=1024, stoch_dim=32, discrete_dim=32):
+    def __init__(self, deter_dim=512, stoch_dim=32):
         super(MultiModalDecoder, self).__init__()
-        input_dim = deter_dim + (stoch_dim * discrete_dim)
+        # FIX 1: Match input size to RSSM (512 + 32 = 544)
+        input_dim = deter_dim + stoch_dim
         
         self.fc = nn.Linear(input_dim, 256 * 8 * 8)
         
-        # Mirror of the Encoder (Deconvolutional layers)
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2), # 18x18
+            # 8x8 -> 18x18
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2), 
             nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2),  # 38x38
+            # 18x18 -> 38x38
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2),   # 79x79
+            # 38x38 -> 79x79
+            # FIX 2: Added output_padding=1 here to match the Encoder's shape perfectly
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, output_padding=1),
             nn.ReLU(),
-            nn.ConvTranspose2d(32, 2, kernel_size=4, stride=2, output_padding=1), # 160x160
-            nn.Sigmoid() # Normalizes output to [0, 1] for image reconstruction
+            # 79x79 -> 160x160
+            nn.ConvTranspose2d(32, 2, kernel_size=4, stride=2),
+            nn.Sigmoid() 
         )
 
     def forward(self, deter, stoch):
-        state = torch.cat([deter, stoch.reshape(stoch.shape[0], -1)], dim=-1)
-        x = self.fc(state).view(-1, 256, 8, 8)
-        return self.deconv(x)
+        # FIX 3: Concatenate properly without reshaping (since we aren't using discrete vars)
+        x = torch.cat([deter, stoch], dim=-1)
+        x = self.fc(x).view(-1, 256, 8, 8)
+        
+        reconstruction = self.deconv(x)
+        
+        # FIX 4: Split the 2-channel output into Depth and Semantic
+        # This allows: recon_depth, recon_sem = decoder(...)
+        recon_depth = reconstruction[:, 0:1, :, :]
+        recon_sem = reconstruction[:, 1:2, :, :]
+        
+        return recon_depth, recon_sem
