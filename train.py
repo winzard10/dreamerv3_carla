@@ -26,7 +26,7 @@ LAMBDA = 0.95
 LOAD_PRETRAINED = True
 PHASE_A_MODEL_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 PHASE_B_MODEL_PATH = "checkpoints/dreamerv3/dreamerv3_latest.pth"
-SAVE_INTERVAL = 5 # Save every 50 episodes
+SAVE_INTERVAL = 50 # Save every 50 episodes
 
 def symlog(x):
     return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
