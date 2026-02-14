@@ -9,7 +9,7 @@ from models.actor_critic import Actor
 # Configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # TOWN = 'Town02'
-MODEL_PATH = "./checkpoints/actor/dreamerv3_ep9.pth" # './checkpoints/dreamer_v3_final.pth'
+MODEL_PATH = "./checkpoints/dreamerv3/dreamerv3_latest.pth" # './checkpoints/dreamer_v3_final.pth'
 
 def test(num_episodes=5):
     env = CarlaEnv()
