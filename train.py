@@ -15,6 +15,9 @@ from tqdm import tqdm
 # --- Configuration & Hyperparameters ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEQ_LEN = 50 
+PART_A_TRAINING_SIZE = 20000
+PART_B_EPISODE = 500
+PART_B_EPOCH = 1000
 BATCH_SIZE = 16
 HORIZON = 15
 LEARNING_RATE = 3e-4
@@ -43,7 +46,7 @@ def compute_lambda_returns(rewards, values, discount=0.99, lambd=0.95):
 def train():
     # 1. Setup Environment & Buffer
     env = CarlaEnv()
-    buffer = SequenceBuffer(capacity=20000, seq_len=SEQ_LEN, device=DEVICE)
+    buffer = SequenceBuffer(capacity=100000, seq_len=SEQ_LEN, device=DEVICE)
     buffer.load_from_disk("./data/expert_sequences")
     writer = SummaryWriter(log_dir="./runs/dreamerv3_carla")
     global_step = 0
@@ -65,10 +68,10 @@ def train():
 
     # --- PHASE A: Pre-training (Expert Knowledge) ---
     print("\n[Phase A] Pre-training on Expert PID Data...")
-    pbar_pre = tqdm(range(500), desc="Pre-training")
+    pbar_pre = tqdm(range(PART_A_TRAINING_SIZE), desc="Pre-training")
     for step_pre in pbar_pre:
         # Sample 6 items
-        depths, sems, vectors, actions, rewards, _ = buffer.sample(BATCH_SIZE)
+        depths, sems, vectors, goals, actions, rewards, _ = buffer.sample(BATCH_SIZE)
         
         wm_opt.zero_grad()
         
@@ -76,13 +79,14 @@ def train():
         B, T, C, H, W = depths.shape
         flat_depth = depths.view(B * T, C, H, W)
         flat_sem = sems.view(B * T, C, H, W)
-        flat_vec = vectors.view(B * T, -1) 
-
-        flat_embeds = encoder(flat_depth, flat_sem, flat_vec)
-        embeds = flat_embeds.view(B, T, -1)
+        flat_vec = vectors.view(B * T, -1)
+        flat_goals = goals.view(B * T, -1)
+        
+        flat_embeds = encoder(flat_depth, flat_sem, flat_vec, flat_goals)
+        embeds = flat_embeds.view(B, T, -1) 
         
         # RSSM Forward
-        (post_h, post_z), (prior_h, prior_z) = rssm.observe_sequence(embeds, actions)
+        (post_h, post_z), (prior_h, prior_z) = rssm.observe_sequence(embeds, actions, goals)
     
         # Decoder Forward
         recon_depth, recon_sem = decoder(post_h, post_z)
@@ -108,12 +112,12 @@ def train():
     # --- PHASE B: Online Training (Driving & Dreaming) ---
     print("\n[Phase B] Starting Online Interaction...")
     spectator = env.world.get_spectator()
-    for episode in range(100):
+    for episode in range(PART_B_EPISODE):
         obs = env.reset()
         h = rssm.get_initial_state(1, DEVICE)
         episode_reward = 0
         
-        pbar_steps = tqdm(range(500), desc=f"Episode {episode}", leave=False)
+        pbar_steps = tqdm(range(PART_B_EPOCH), desc=f"Episode {episode}", leave=False)
         for step in pbar_steps:
             # 1. Action Selection
             with torch.no_grad():
@@ -125,10 +129,17 @@ def train():
                 if isinstance(vec_val, np.ndarray):
                     vec_val = vec_val.copy()
                 vec_in = torch.as_tensor(vec_val).to(DEVICE).float().unsqueeze(0)
+                g_val = obs.get('goal', [0,0])
+                if isinstance(g_val, np.ndarray): g_val = g_val.copy()
+                g_in = torch.as_tensor(g_val).to(DEVICE).float().unsqueeze(0)
 
-                embed = encoder(depth_in, sem_in, vec_in)
-                z = rssm.representation_model(torch.cat([h, embed], dim=-1)) 
-                action = actor(h, z)
+                embed = encoder(depth_in, sem_in, vec_in, g_in)
+                z = rssm.representation_model(torch.cat([h, embed, g_in], dim=-1)) 
+                action = actor(h, z, g_in)
+                # Add noise that decays over episodes
+                noise_std = max(0.05, 0.4 * (1 - episode / 400)) 
+                action = action + torch.randn_like(action) * noise_std
+                action = torch.clamp(action, -1.0, 1.0)
             
             act_np = action.cpu().numpy()[0]
             next_obs, reward, done, _ = env.step(act_np)
@@ -143,7 +154,10 @@ def train():
             # Update camera
             spectator.set_transform(carla.Transform(back_pos, v_transform.rotation))
             
-            buffer.add(obs['depth'], obs['semantic'], obs.get('vector', np.zeros(3)), act_np, reward, done)
+            buffer.add(obs['depth'], obs['semantic'], 
+                       obs.get('vector', np.zeros(3)), 
+                       obs.get('goal', np.zeros(2)), # Added goal
+                       act_np, reward, done)
             episode_reward += reward
             
             h = rssm.gru(torch.cat([z, action], dim=-1), h)
@@ -153,7 +167,7 @@ def train():
 
             # 2. Update Loop
             if step % 5 == 0 and buffer.idx > BATCH_SIZE:
-                depths, sems, vectors, actions, rewards, _ = buffer.sample(BATCH_SIZE)
+                depths, sems, vectors, goals, actions, rewards, _ = buffer.sample(BATCH_SIZE)
                 
                 wm_opt.zero_grad()
                 
@@ -161,11 +175,12 @@ def train():
                 flat_depth = depths.view(B_dim * T_dim, C, H, W)
                 flat_sem = sems.view(B_dim * T_dim, C, H, W)
                 flat_vec = vectors.view(B_dim * T_dim, -1)
+                flat_goals = goals.view(B_dim * T_dim, -1)
                 
-                flat_embeds = encoder(flat_depth, flat_sem, flat_vec)
+                flat_embeds = encoder(flat_depth, flat_sem, flat_vec, flat_goals)
                 embeds = flat_embeds.view(B_dim, T_dim, -1)
                 
-                (post_h, post_z), (prior_h, prior_z) = rssm.observe_sequence(embeds, actions)
+                (post_h, post_z), (prior_h, prior_z) = rssm.observe_sequence(embeds, actions, goals)
                 
                 recon_depth, recon_sem = decoder(post_h, post_z)
                 
@@ -179,10 +194,13 @@ def train():
                 
                 loss_wm.backward()
                 wm_opt.step()
+                
+                start_h = post_h[:, -1].detach() 
+                start_z = post_z[:, -1].detach()
 
                 # --- UPDATE IMAGINATION ---
                 ac_opt.zero_grad()
-                imag_states_h, imag_states_z = rssm.imagine(h.detach(), z.detach(), actor, horizon=HORIZON)
+                imag_states_h, imag_states_z = rssm.imagine(start_h, start_z, goals[:, -1], actor)
                 
                 imag_rewards = symlog(rssm.predict_reward(imag_states_h, imag_states_z))
                 imag_values = critic(imag_states_h, imag_states_z)

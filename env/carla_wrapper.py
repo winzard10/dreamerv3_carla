@@ -30,25 +30,40 @@ class CarlaEnv(gym.Env):
         self.last_data = {"depth": None, "semantic": None}
 
     def reset(self):
-        # Cleanup existing actors
+        # 1. Cleanup existing actors
         self._cleanup()
         
-        # Configure Synchronous Mode
+        # 2. Configure Synchronous Mode
         settings = self.world.get_settings()
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = 0.05
         self.world.apply_settings(settings)
 
-        # Spawn Vehicle
+        # --- MOVED UP: Spawn Vehicle FIRST ---
         bp = self.blueprint_library.find('vehicle.tesla.model3')
-        spawn_point = random.choice(self.world.get_map().get_spawn_points())
+        # Get map here so we can find spawn points
+        self.map = self.world.get_map() 
+        spawn_point = random.choice(self.map.get_spawn_points())
         self.vehicle = self.world.spawn_actor(bp, spawn_point)
+        # -------------------------------------
+        
+        # --- NOW you can Generate the Route ---
+        # Now self.vehicle exists, so this line won't crash
+        current_w = self.map.get_waypoint(self.vehicle.get_location())
+        
+        self.route_waypoints = [current_w]
+        for _ in range(5000):
+            # next(2.0) returns a list; pick the first one
+            next_w = self.route_waypoints[-1].next(2.0)[0]
+            self.route_waypoints.append(next_w)
+        
+        self.current_waypoint_index = 0
+        # -------------------------------------
 
-        # Attach Multi-Modal Sensors
+        # 4. Attach Multi-Modal Sensors
         self._setup_sensors()
         
-        # Tick to initialize data
-        # Keep ticking until both sensors have sent their first frame
+        # 5. Tick to initialize data
         max_tries = 100
         tries = 0
         
@@ -58,7 +73,7 @@ class CarlaEnv(gym.Env):
         
         if tries == max_tries:
             print("ERROR: Sensors failed to initialize after 100 ticks.")
-        # --------------------------
+            
         return self._get_obs()
 
     def step(self, action):
@@ -99,6 +114,15 @@ class CarlaEnv(gym.Env):
         self.sem_sensor.listen(lambda image: self._process_sem(image))
         
         self.sensors.extend([self.depth_sensor, self.sem_sensor])
+        
+        col_bp = self.blueprint_library.find('sensor.other.collision')
+        self.col_sensor = self.world.spawn_actor(col_bp, carla.Transform(), attach_to=self.vehicle)
+        self.col_sensor.listen(lambda event: self._on_collision(event))
+        self.sensors.append(self.col_sensor)
+        self.collision_hist = []
+    
+    def _on_collision(self, event):
+        self.collision_hist.append(event)
 
     def _process_depth(self, image):
         # Convert raw to log-depth for better feature learning
@@ -113,21 +137,114 @@ class CarlaEnv(gym.Env):
         self.last_data["semantic"] = array[:, :, 2:3] # Blue channel contains tags
 
     def _get_obs(self):
+        player_transform = self.vehicle.get_transform()
+        
+        # 1. Update Waypoint Index
+        if self.current_waypoint_index < len(self.route_waypoints) - 5:
+            self.current_waypoint_index += 1
+        
+        # 2. Calculate Goal
+        target_waypoint = self.route_waypoints[self.current_waypoint_index]
+        local_goal = self.get_local_goal(player_transform, target_waypoint.transform.location)
+        
+        # 3. Calculate Vector (Speed/Heading info)
         v = self.vehicle.get_velocity()
-        kmh = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
+        # Vector: [Velocity X, Velocity Y, Angular Velocity Z] (Example)
+        # Or just use [Speed, 0, 0] if you want simple speed
+        speed = np.sqrt(v.x**2 + v.y**2 + v.z**2)
+        vector = np.array([speed, 0, 0], dtype=np.float32) # Simplified for now
+
         return {
-            "depth": self.last_data["depth"],
-            "semantic": self.last_data["semantic"],
-            "vector": np.array([kmh, 0.0, 0.0], dtype=np.float32) # Simplification
+            "depth": self.last_data["depth"],       # FIX: Use self.last_data
+            "semantic": self.last_data["semantic"], # FIX: Use self.last_data
+            "vector": vector,                       # FIX: Added missing vector
+            "goal": local_goal / 10.0 
         }
+    
+    def get_local_goal(self, player_transform, goal_location):
+        """
+        Transforms a global goal_location into a local (dx, dy) 
+        relative to the player_transform (car's position/rotation).
+        """
+        # 1. Get relative world position
+        dx_world = goal_location.x - player_transform.location.x
+        dy_world = goal_location.y - player_transform.location.y
+        
+        # 2. Get car's rotation in radians
+        # CARLA uses degrees; 0 is East, 90 is South
+        yaw = np.radians(player_transform.rotation.yaw)
+        
+        # 3. Rotate world coordinates into car's local frame
+        # Standard 2D rotation: 
+        # x_local =  dx*cos(yaw) + dy*sin(yaw)
+        # y_local = -dx*sin(yaw) + dy*cos(yaw)
+        dx_local =  dx_world * np.cos(yaw) + dy_world * np.sin(yaw)
+        dy_local = -dx_world * np.sin(yaw) + dy_world * np.cos(yaw)
+        
+        return np.array([dx_local, dy_local], dtype=np.float32)
         
     def _calculate_reward(self):
-        # Basic reward: speed in km/h
         v = self.vehicle.get_velocity()
-        return 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
+        speed_kmh = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
+        
+        # 1. SPEED REWARD (Target: 25 km/h)
+        # We prefer speed up to 25, then diminishing returns.
+        if speed_kmh < 25:
+            r_speed = speed_kmh / 25.0
+        else:
+            r_speed = 1.0 # Cap it so it doesn't prioritize speeding over safety
+
+        # 2. CENTERING REWARD
+        # Get distance from lane center
+        vehicle_location = self.vehicle.get_location()
+        waypoint = self.map.get_waypoint(vehicle_location)
+        
+        # Calculate distance between car and waypoint
+        dist_to_center = vehicle_location.distance(waypoint.transform.location)
+        
+        # Reward is 1.0 if perfectly centered, drops to 0.0 at 2 meters out
+        r_center = max(0.0, 1.0 - (dist_to_center / 2.0))
+
+        # 3. ANGLE REWARD (Alignment)
+        # Compare car heading vs road heading
+        vehicle_yaw = self.vehicle.get_transform().rotation.yaw
+        waypoint_yaw = waypoint.transform.rotation.yaw
+        
+        # Normalize angle difference to [-180, 180]
+        diff = abs(vehicle_yaw - waypoint_yaw) % 360
+        if diff > 180: diff = 360 - diff
+        
+        # Reward 1.0 if aligned, 0.0 if 90 degrees off
+        r_angle = max(0.0, 1.0 - (diff / 30.0)) # Strict: must be within 30 deg
+
+        # 4. COLLISION PENALTY
+        r_collision = 0.0
+        if len(self.collision_hist) > 0:
+            r_collision = -10.0 # Massive penalty for crashing
+            self.collision_hist = [] # Reset for next step
+
+        # TOTAL REWARD
+        # Weighted sum: Speed is good, but Centering/Angle are multipliers
+        # If you are off-road (r_center=0), speed reward becomes irrelevant.
+        total_reward = r_speed * r_center * r_angle + r_collision
+        
+        return total_reward
 
     def _check_done(self):
-        return False # Simple test logic
+        # 1. Collision
+        if len(self.collision_hist) > 0:
+            return True
+            
+        # 2. Off-road (Lane Invasion)
+        vehicle_location = self.vehicle.get_location()
+        waypoint = self.map.get_waypoint(vehicle_location)
+        dist_to_center = vehicle_location.distance(waypoint.transform.location)
+        
+        # If car is more than 3 meters from center, it's off the road
+        if dist_to_center > 3.0:
+            return True
+            
+        return False
 
     def _cleanup(self):
         # Ensure clean break to avoid crashes

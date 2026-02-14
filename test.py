@@ -9,7 +9,7 @@ from models.actor_critic import Actor
 # Configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # TOWN = 'Town02'
-MODEL_PATH = "./checkpoints/dreamerv3_ep99.pth" # './checkpoints/dreamer_v3_final.pth'
+MODEL_PATH = "./checkpoints/dreamerv3_ep9.pth" # './checkpoints/dreamer_v3_final.pth'
 
 def test(num_episodes=5):
     env = CarlaEnv()
@@ -60,23 +60,17 @@ def test(num_episodes=5):
         
         while not done:
             with torch.no_grad():
-                # Correct Tensor Processing
-                d_in = torch.as_tensor(obs['depth'].copy()).to(DEVICE).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-                s_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2, 0, 1).unsqueeze(0)
+                d_in = torch.as_tensor(obs['depth'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
+                s_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0)
                 v_in = torch.as_tensor(obs['vector'].copy()).to(DEVICE).float().unsqueeze(0)
-                
-                # Update Hidden State h using previous action
-                # h_t = gru(z_{t-1}, a_{t-1}, h_{t-1})
+                g_in = torch.as_tensor(obs['goal'].copy()).to(DEVICE).float().unsqueeze(0) # NEW
+
                 h = rssm.gru(torch.cat([z, prev_action], dim=-1), h)
                 
-                # Get Observation Embedding
-                embed = encoder(d_in, s_in, v_in)
-                
-                # Get Current Stochastic State z (Posterior)
-                z = rssm.representation_model(torch.cat([h, embed], dim=-1))
-                
-                # Actor decides action based on current [h, z]
-                action = actor(h, z)
+                # Encoder and Actor now take g_in (the Goal)
+                embed = encoder(d_in, s_in, v_in, g_in)
+                z = rssm.representation_model(torch.cat([h, embed, g_in], dim=-1))
+                action = actor(h, z, g_in)
                 prev_action = action # Store for next loop
             
             # Step Environment
@@ -84,7 +78,7 @@ def test(num_episodes=5):
             
             # --- Spectator Chase Cam ---
             v_trans = env.vehicle.get_transform()
-            cam_pos = v_trans.location - (v_trans.get_transform().get_forward_vector() * 8.0) + carla.Location(z=4.0)
+            cam_pos = v_trans.location - (v_trans.get_forward_vector() * 8.0) + carla.Location(z=4.0)
             spectator.set_transform(carla.Transform(cam_pos, v_trans.rotation))
 
             ep_velocity.append(obs['vector'][0])

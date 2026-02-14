@@ -34,7 +34,18 @@ def export_tb_to_plots(log_dir, output_dir="./plots"):
         # Formatting
         clean_name = tag.replace('/', '_')
         plt.title(f"DreamerV3 Training: {tag}", fontsize=14)
-        plt.xlabel("Global Step (or Episode)", fontsize=12)
+        if 'Pretrain' in tag or 'WM_Loss' in tag:
+            # Pre-training is based on individual optimizer updates/steps
+            plt.xlabel("Training Step", fontsize=12)
+        elif 'Reward' in tag:
+            # Performance in RL is traditionally measured across full environment cycles
+            plt.xlabel("Episode", fontsize=12)
+        elif 'Actor' in tag or 'Critic' in tag:
+            # These online updates typically follow global environment steps
+            plt.xlabel("Global Step", fontsize=12)
+        else:
+            plt.xlabel("Step", fontsize=12)
+
         plt.ylabel("Value", fontsize=12)
         plt.grid(True, linestyle='--', alpha=0.6)
         plt.legend()

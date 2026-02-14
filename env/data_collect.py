@@ -6,7 +6,7 @@ from env.carla_wrapper import CarlaEnv
 
 # Configuration
 SAVE_DIR = "./data/expert_sequences"
-TARGET_STEPS = 5000  # Start with a small batch to test
+TARGET_STEPS = 50000  # Start with a small batch to test
 SEQ_LEN = 50         # DreamerV3 prefers sequences
 
 def run_collection():
@@ -20,6 +20,8 @@ def run_collection():
     current_seq = {
         "depth": [],
         "semantic": [],
+        "goal": [],
+        "vector": [],
         "action": [],
         "reward": []
     }
@@ -65,6 +67,8 @@ def run_collection():
         # 3. Save to sequence buffer
         current_seq["depth"].append(obs["depth"])
         current_seq["semantic"].append(obs["semantic"])
+        current_seq["goal"].append(obs["goal"])
+        current_seq["vector"].append(obs["vector"])
         current_seq["action"].append(action)
         current_seq["reward"].append(reward)
 
@@ -75,6 +79,8 @@ def run_collection():
                 f"{SAVE_DIR}/seq_{seq_idx}.npz",
                 depth=np.array(current_seq["depth"]),
                 semantic=np.array(current_seq["semantic"]),
+                goal=np.array(current_seq["goal"]),
+                vector=np.array(current_seq["vector"]),
                 action=np.array(current_seq["action"]),
                 reward=np.array(current_seq["reward"])
             )

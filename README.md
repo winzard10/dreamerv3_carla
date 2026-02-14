@@ -32,8 +32,11 @@ python3 -m env.data_collect
 # Train
 python3 -m train
 
+# Tensorboard
+tensorboard --logdir=runs
+
 # Test
 python3 -m test
 
-# Tensorboard
-tensorboard --logdir=runs
+# 6. Generate Graphs
+python3 -m utils.plotter
