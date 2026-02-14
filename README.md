@@ -21,7 +21,7 @@ source venv_rl/bin/activate
 # Runs off-screen
 ./carla_sim/CarlaUE4.sh -RenderOffScreen
 
-./CarlaUE4.sh -quality-level=Low -benchmark -fps=20
+./carla_sim/CarlaUE4.sh -quality-level=Low -benchmark -fps=20
 
 # Check GPU status
 watch -n 1 nvidia-smi

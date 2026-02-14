@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import os
+from tqdm import tqdm
 
 class SequenceBuffer:
     def __init__(self, capacity, seq_len, device):
@@ -73,18 +74,19 @@ class SequenceBuffer:
             print(f"No expert data found at {path}")
             return
         
-        for file in os.listdir(path):
-            if file.endswith(".npz"):
-                data = np.load(os.path.join(path, file))
-                for i in range(len(data['action'])):
-                    # Handle cases where 'vector' might be missing in old expert data
-                    vec = data['vector'][i] if 'vector' in data else np.zeros(3)
-                    goal = data['goal'][i] if 'goal' in data else np.zeros(2)
-                    self.add(data['depth'][i], 
-                             data['semantic'][i], 
-                             vec, # Correctly pass 6 arguments
-                             goal,
-                             data['action'][i], 
-                             data['reward'][i], 
-                             False)
+        files = [f for f in os.listdir(path) if f.endswith(".npz")]
+    
+        for file in tqdm(files, desc="Loading Expert Data", unit="file"):
+            data = np.load(os.path.join(path, file))
+            for i in range(len(data['action'])):
+                # Handle cases where 'vector' might be missing in old expert data
+                vec = data['vector'][i] if 'vector' in data else np.zeros(3)
+                goal = data['goal'][i] if 'goal' in data else np.zeros(2)
+                self.add(data['depth'][i], 
+                            data['semantic'][i], 
+                            vec, # Correctly pass 6 arguments
+                            goal,
+                            data['action'][i], 
+                            data['reward'][i], 
+                            False)
         print(f"Loaded expert data into buffer. Current size: {self.idx if not self.full else self.capacity}")
