@@ -123,7 +123,7 @@ def train():
             with torch.no_grad():
                 # Add .copy() to depth, semantic, and vector
                 depth_in = torch.as_tensor(obs['depth'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
-                sem_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0)
+                sem_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
                 # Ensure vector is also copied if it comes from numpy
                 vec_val = obs.get('vector', [0,0,0])
                 if isinstance(vec_val, np.ndarray):

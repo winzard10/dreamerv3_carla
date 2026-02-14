@@ -60,7 +60,7 @@ class SequenceBuffer:
         # depths, sems, vectors, actions, rewards, _ = buffer.sample(BATCH_SIZE)
         return (
             to_torch(obs_depth).permute(0, 1, 4, 2, 3) / 255.0, 
-            to_torch(obs_sem).permute(0, 1, 4, 2, 3), 
+            to_torch(obs_sem).permute(0, 1, 4, 2, 3) / 255.0, 
             to_torch(veccs),
             to_torch(goals),
             to_torch(acts), 

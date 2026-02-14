@@ -61,7 +61,7 @@ def test(num_episodes=5):
         while not done:
             with torch.no_grad():
                 d_in = torch.as_tensor(obs['depth'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
-                s_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0)
+                s_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
                 v_in = torch.as_tensor(obs['vector'].copy()).to(DEVICE).float().unsqueeze(0)
                 g_in = torch.as_tensor(obs['goal'].copy()).to(DEVICE).float().unsqueeze(0) # NEW
 
