@@ -15,13 +15,18 @@ from tqdm import tqdm
 # --- Configuration & Hyperparameters ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEQ_LEN = 50 
-PART_A_TRAINING_SIZE = 20000
-PART_B_EPISODE = 500
-PART_B_EPOCH = 1000
+PART_A_TRAINING_SIZE = 10 # 20000
+PART_B_EPISODE = 5 # 500
+PART_B_EPOCH = 10 # 1000
 BATCH_SIZE = 16
-HORIZON = 15
+HORIZON = 25 # 15
 LEARNING_RATE = 3e-4
-LAMBDA = 0.95 
+LAMBDA = 0.95
+
+LOAD_PRETRAINED = True
+PHASE_A_MODEL_PATH = "checkpoints/world_model/world_model_pretrained.pth"
+PHASE_B_MODEL_PATH = "checkpoints/dreamerv3/dreamerv3_latest.pth"
+SAVE_INTERVAL = 5 # Save every 50 episodes
 
 def symlog(x):
     return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
@@ -50,7 +55,6 @@ def train():
     buffer.load_from_disk("./data/expert_sequences")
     writer = SummaryWriter(log_dir="./runs/dreamerv3_carla")
     global_step = 0
-
     # 2. Model Initialization
     encoder = MultiModalEncoder().to(DEVICE)
     rssm = RSSM(hidden_dim=512).to(DEVICE)
@@ -68,50 +72,90 @@ def train():
 
     # --- PHASE A: Pre-training (Expert Knowledge) ---
     print("\n[Phase A] Pre-training on Expert PID Data...")
-    pbar_pre = tqdm(range(PART_A_TRAINING_SIZE), desc="Pre-training")
-    for step_pre in pbar_pre:
-        # Sample 6 items
-        depths, sems, vectors, goals, actions, rewards, _ = buffer.sample(BATCH_SIZE)
-        
-        wm_opt.zero_grad()
-        
-        # Flatten Batch and Time for Encoder
-        B, T, C, H, W = depths.shape
-        flat_depth = depths.view(B * T, C, H, W)
-        flat_sem = sems.view(B * T, C, H, W)
-        flat_vec = vectors.view(B * T, -1)
-        flat_goals = goals.view(B * T, -1)
-        
-        flat_embeds = encoder(flat_depth, flat_sem, flat_vec, flat_goals)
-        embeds = flat_embeds.view(B, T, -1) 
-        
-        # RSSM Forward
-        (post_h, post_z), (prior_h, prior_z) = rssm.observe_sequence(embeds, actions, goals)
+    if LOAD_PRETRAINED and os.path.exists("checkpoints/world_model/world_model_pretrained.pth"):
+        print("Loading pre-trained World Model...")
+        checkpoint = torch.load("checkpoints/world_model/world_model_pretrained.pth", weights_only=True)
+        encoder.load_state_dict(checkpoint['encoder'])
+        rssm.load_state_dict(checkpoint['rssm'])
+        decoder.load_state_dict(checkpoint['decoder'])
+        wm_opt.load_state_dict(checkpoint['wm_opt'])
     
-        # Decoder Forward
-        recon_depth, recon_sem = decoder(post_h, post_z)
+    else:
+        if LOAD_PRETRAINED:
+            print("Pre-trained model not found. Starting pre-training from scratch...")
         
-        # --- FIX: Flatten Targets to match Decoder Output [800, 1, 160, 160] ---
-        target_depth = depths.view(-1, 1, 160, 160)
-        target_sem = sems.view(-1, 1, 160, 160)
+        pbar_pre = tqdm(range(PART_A_TRAINING_SIZE), desc="Pre-training")
+        for step_pre in pbar_pre:
+            # Sample 6 items
+            depths, sems, vectors, goals, actions, rewards, _ = buffer.sample(BATCH_SIZE)
+            
+            wm_opt.zero_grad()
+            
+            # Flatten Batch and Time for Encoder
+            B, T, C, H, W = depths.shape
+            flat_depth = depths.view(B * T, C, H, W) / 255.0
+            flat_sem = sems.view(B * T, C, H, W) / 255.0
+            flat_vec = vectors.view(B * T, -1)
+            flat_goals = goals.view(B * T, -1)
+            
+            flat_embeds = encoder(flat_depth, flat_sem, flat_vec, flat_goals)
+            embeds = flat_embeds.view(B, T, -1) 
+            
+            # RSSM Forward
+            (post_h, post_z), (prior_h, prior_z) = rssm.observe_sequence(embeds, actions, goals)
         
-        # Loss Calculation (Using MSE for Semantics since output is 1 channel scalar)
-        loss_wm = F.mse_loss(recon_depth, target_depth) + \
-                  F.mse_loss(recon_sem, target_sem) + \
-                  rssm.kl_loss(post_z, prior_z) 
+            # Decoder Forward
+            recon_depth, recon_sem = decoder(post_h, post_z)
+            
+            # --- FIX: Flatten Targets to match Decoder Output [800, 1, 160, 160] ---
+            target_depth = depths.view(-1, 1, 160, 160) / 255.0
+            target_sem = sems.view(-1, 1, 160, 160) / 255.0
+            
+            # Loss Calculation (Using MSE for Semantics since output is 1 channel scalar)
+            loss_wm = F.mse_loss(recon_depth, target_depth) + \
+                    F.mse_loss(recon_sem, target_sem) + \
+                    rssm.kl_loss(post_z, prior_z) 
+            
+            loss_wm.backward()
+            wm_opt.step()
+            
+            if step_pre % 10 == 0:
+                writer.add_scalar("Pretrain/WM_Loss", loss_wm.item(), step_pre)
+                writer.add_scalar("Pretrain/KL_Loss", rssm.kl_loss(post_z, prior_z).item(), step_pre)
+            
+            pbar_pre.set_postfix({"WM_Loss": f"{loss_wm.item():.4f}"})
         
-        loss_wm.backward()
-        wm_opt.step()
+            if not os.path.exists("checkpoints"):
+                os.makedirs("checkpoints")
+            
+            if not os.path.exists("checkpoints/world_model"):
+                os.makedirs("checkpoints/world_model")
         
-        if step_pre % 10 == 0:
-            writer.add_scalar("Pretrain/WM_Loss", loss_wm.item(), step_pre)
-            writer.add_scalar("Pretrain/KL_Loss", rssm.kl_loss(post_z, prior_z).item(), step_pre)
-        
-        pbar_pre.set_postfix({"WM_Loss": f"{loss_wm.item():.4f}"})
+            torch.save({
+                'encoder': encoder.state_dict(),
+                'rssm': rssm.state_dict(),
+                'decoder': decoder.state_dict(),
+                'wm_opt': wm_opt.state_dict(), # Save optimizer state too!
+                'ac_opt': ac_opt.state_dict(), # Save actor-critic optimizer for continuity
+            }, PHASE_A_MODEL_PATH)
 
     # --- PHASE B: Online Training (Driving & Dreaming) ---
     print("\n[Phase B] Starting Online Interaction...")
     spectator = env.world.get_spectator()
+    if LOAD_PRETRAINED:
+        if os.path.exists(PHASE_B_MODEL_PATH):
+            print("Loading pre-trained Actor/Critic...")
+            ac_checkpoint = torch.load(PHASE_B_MODEL_PATH, weights_only=True)
+            actor.load_state_dict(ac_checkpoint['actor'])
+            critic.load_state_dict(ac_checkpoint['critic'])
+            ac_opt.load_state_dict(ac_checkpoint['ac_opt']) # Load optimizer state for continuity
+            wm_opt.load_state_dict(ac_checkpoint['wm_opt']) # Load world model optimizer to keep "eyes" sharp
+            rssm.load_state_dict(ac_checkpoint['rssm']) # Load RSSM to keep "memory" consistent
+            encoder.load_state_dict(ac_checkpoint['encoder']) # Load Encoder to keep "perception" consistent
+            decoder.load_state_dict(ac_checkpoint['decoder']) # Load Decoder to keep "imagination" consistent
+        else:
+            print("Pre-trained Actor/Critic not found. Starting online training from scratch...")
+    
     for episode in range(PART_B_EPISODE):
         obs = env.reset()
         h = rssm.get_initial_state(1, DEVICE)
@@ -172,8 +216,8 @@ def train():
                 wm_opt.zero_grad()
                 
                 B_dim, T_dim, C, H, W = depths.shape
-                flat_depth = depths.view(B_dim * T_dim, C, H, W)
-                flat_sem = sems.view(B_dim * T_dim, C, H, W)
+                flat_depth = depths.view(B_dim * T_dim, C, H, W) / 255.0
+                flat_sem = sems.view(B_dim * T_dim, C, H, W) / 255.0
                 flat_vec = vectors.view(B_dim * T_dim, -1)
                 flat_goals = goals.view(B_dim * T_dim, -1)
                 
@@ -185,8 +229,8 @@ def train():
                 recon_depth, recon_sem = decoder(post_h, post_z)
                 
                 # --- FIX: Flatten Targets ---
-                target_depth = depths.view(-1, 1, 160, 160)
-                target_sem = sems.view(-1, 1, 160, 160)
+                target_depth = depths.view(-1, 1, 160, 160) / 255.0
+                target_sem = sems.view(-1, 1, 160, 160) / 255.0
                 
                 loss_wm = F.mse_loss(recon_depth, target_depth) + \
                           F.mse_loss(recon_sem, target_sem) + \
@@ -219,10 +263,13 @@ def train():
                 if step % 100 == 0:
                     with torch.no_grad():
                         # Stack real and recon side-by-side
-                        vis = torch.cat([target_depth[0:1], recon_depth[0:1]], dim=-1)
-                        # Normalize to [0, 1] for display
-                        vis = (vis - vis.min()) / (vis.max() - vis.min() + 1e-8)
-                        writer.add_image("Visuals/Depth_Recon", vis.squeeze(0), global_step)
+                        vis_depth = torch.cat([target_depth[0:1], recon_depth[0:1]], dim=-1)
+                        vis_depth = (vis_depth - vis_depth.min()) / (vis_depth.max() - vis_depth.min() + 1e-8)
+                        writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
+                        
+                        vis_sem = torch.cat([target_sem[0:1], recon_sem[0:1]], dim=-1)
+                        # We don't need heavy normalization here because Sigmoid already keeps it 0-1
+                        writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
                 
                 pbar_steps.set_postfix({"Rew": f"{episode_reward:.1f}", "WM_Loss": f"{loss_wm.item():.3f}"})
 
@@ -234,13 +281,22 @@ def train():
         if not os.path.exists("checkpoints"):
             os.makedirs("checkpoints")
         
+        if not os.path.exists("checkpoints/dreamerv3"):
+            os.makedirs("checkpoints/dreamerv3")
+        
         checkpoint_data = {
             'encoder': encoder.state_dict(),
             'rssm': rssm.state_dict(),
+            'decoder': decoder.state_dict(), # Include this to keep the "eyes" sharp
             'actor': actor.state_dict(),
-            'critic': critic.state_dict() # Optional, but good for resuming training
+            'critic': critic.state_dict(),
+            'wm_opt': wm_opt.state_dict(),   # Highly recommended for resuming
+            'ac_opt': ac_opt.state_dict(),   # Highly recommended for resuming
         }
-        torch.save(checkpoint_data, f"checkpoints/dreamerv3_ep{episode}.pth")
+        if (episode+1) % SAVE_INTERVAL == 0:  # Save every 50 episodes
+            torch.save(checkpoint_data, f"checkpoints/dreamerv3/dreamerv3_ep{episode}.pth")
+    
+    torch.save(checkpoint_data, PHASE_B_MODEL_PATH)
 
 if __name__ == "__main__":
     train()

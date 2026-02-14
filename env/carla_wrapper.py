@@ -13,6 +13,7 @@ class CarlaEnv(gym.Env):
         self.client.set_timeout(10.0)
         self.world = self.client.get_world()
         self.blueprint_library = self.world.get_blueprint_library()
+        self.stuck_ticks = 0
         
         # 2. Define Observation and Action Spaces
         # We use 160x160 as per DreamerV3 defaults for efficiency
@@ -32,6 +33,7 @@ class CarlaEnv(gym.Env):
     def reset(self):
         # 1. Cleanup existing actors
         self._cleanup()
+        self.stuck_ticks = 0
         
         # 2. Configure Synchronous Mode
         settings = self.world.get_settings()
@@ -73,7 +75,8 @@ class CarlaEnv(gym.Env):
         
         if tries == max_tries:
             print("ERROR: Sensors failed to initialize after 100 ticks.")
-            
+        
+        self.collision_hist = []
         return self._get_obs()
 
     def step(self, action):
@@ -91,6 +94,9 @@ class CarlaEnv(gym.Env):
         obs = self._get_obs()
         reward = self._calculate_reward()
         done = self._check_done()
+        
+        if done:
+            self.collision_hist = []
         
         return obs, reward, done, {}
 
@@ -190,7 +196,7 @@ class CarlaEnv(gym.Env):
         # 1. SPEED REWARD (Target: 25 km/h)
         # We prefer speed up to 25, then diminishing returns.
         if speed_kmh < 25:
-            r_speed = speed_kmh / 25.0
+            r_speed = np.sqrt(speed_kmh / 25.0)
         else:
             r_speed = 1.0 # Cap it so it doesn't prioritize speeding over safety
 
@@ -220,19 +226,40 @@ class CarlaEnv(gym.Env):
         # 4. COLLISION PENALTY
         r_collision = 0.0
         if len(self.collision_hist) > 0:
-            r_collision = -10.0 # Massive penalty for crashing
-            self.collision_hist = [] # Reset for next step
+            r_collision = -15.0 # Massive penalty for crashing
+        
+        # 5. STALL PENALTY
+        r_stall = -10.0 if self.stuck_ticks >= 100 else 0.0 
+        
+        r_offroad = 0.0
+        # We use the same 3.0m threshold as your _check_done
+        if dist_to_center > 3.0:
+            r_offroad = -10.0 # Significant punishment for leaving the drivable area
 
         # TOTAL REWARD
         # Weighted sum: Speed is good, but Centering/Angle are multipliers
         # If you are off-road (r_center=0), speed reward becomes irrelevant.
-        total_reward = r_speed * r_center * r_angle + r_collision
+        total_reward = r_speed * r_center * r_angle + r_collision + r_stall + r_offroad
         
         return total_reward
 
     def _check_done(self):
+        if self.current_waypoint_index >= len(self.route_waypoints) - 10:
+            print("SUCCESS: Route Completed!")
+            return True
+    
         # 1. Collision
         if len(self.collision_hist) > 0:
+            return True
+        
+        v = self.vehicle.get_velocity()
+        speed = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
+        if speed < 1.0: # If slower than 1 km/h
+            self.stuck_ticks += 1
+        else:
+            self.stuck_ticks = 0
+
+        if self.stuck_ticks > 100: # Stuck for 5 seconds (100 ticks * 0.05s)
             return True
             
         # 2. Off-road (Lane Invasion)
