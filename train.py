@@ -15,11 +15,11 @@ from tqdm import tqdm
 # --- Configuration & Hyperparameters ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEQ_LEN = 50 
-PART_A_TRAINING_SIZE = 10 # 20000
-PART_B_EPISODE = 5 # 5000
-PART_B_EPOCH = 10 # 1000
+PART_A_TRAINING_SIZE = 20000
+PART_B_EPISODE = 50000
+PART_B_EPOCH = 1000
 BATCH_SIZE = 16
-HORIZON = 25 # 15
+HORIZON = 25
 LEARNING_RATE = 3e-4
 LAMBDA = 0.95
 
