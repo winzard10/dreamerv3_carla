@@ -207,10 +207,10 @@ def train():
             next_obs, reward, done, _ = env.step(act_np)
             
             # In train.py, inside the step loop:
-            if step % 1 == 0:
-                throttle_val = float((act_np[1] + 1) / 2) 
-                # Use f-string formatting for each variable separately inside the string
-                print(f"Ep {episode} | Step {step} | Action (Steer, Throttle): {act_np[0]:.2f}, {throttle_val:.2f}")
+            # if step % 10 == 0:
+            #     throttle_val = float((act_np[1] + 1) / 2) 
+            #     # Use f-string formatting for each variable separately inside the string
+            #     print(f"Ep {episode} | Step {step} | Action (Steer, Throttle): {act_np[0]:.2f}, {throttle_val:.2f}")
             
             # Access the vehicle from your env wrapper
             v_transform = env.vehicle.get_transform()
