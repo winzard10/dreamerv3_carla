@@ -49,6 +49,15 @@ def compute_lambda_returns(rewards, values, discount=0.99, lambd=0.95):
     return returns
 
 def train():
+    # Add this right after the DEVICE definition in train.py
+    print(f"Current Device: {DEVICE}")
+
+    if DEVICE.type == 'cuda':
+        print(f"GPU Name: {torch.cuda.get_device_name(0)}")
+        print(f"Memory Allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+    else:
+        print("WARNING: Running on CPU. This will be very slow.")
+    
     # 1. Setup Environment & Buffer
     env = CarlaEnv()
     buffer = SequenceBuffer(capacity=100000, seq_len=SEQ_LEN, device=DEVICE)
@@ -190,12 +199,18 @@ def train():
                 z = rssm.representation_model(torch.cat([h, embed, g_in], dim=-1)) 
                 action = actor(h, z, g_in)
                 # Add noise that decays over episodes
-                noise_std = max(0.05, 0.5 * (1 - (episode - start_episode) / PART_B_EPISODE))
+                noise_std = max(0.05, 2.0 * (1 - (episode - start_episode) / PART_B_EPISODE))
                 action = action + torch.randn_like(action) * noise_std
                 action = torch.clamp(action, -1.0, 1.0)
             
             act_np = action.cpu().numpy()[0]
             next_obs, reward, done, _ = env.step(act_np)
+            
+            # In train.py, inside the step loop:
+            if step % 1 == 0:
+                throttle_val = float((act_np[1] + 1) / 2) 
+                # Use f-string formatting for each variable separately inside the string
+                print(f"Ep {episode} | Step {step} | Action (Steer, Throttle): {act_np[0]:.2f}, {throttle_val:.2f}")
             
             # Access the vehicle from your env wrapper
             v_transform = env.vehicle.get_transform()

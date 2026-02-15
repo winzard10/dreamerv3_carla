@@ -6,65 +6,66 @@ from env.carla_wrapper import CarlaEnv
 
 # Configuration
 SAVE_DIR = "./data/expert_sequences"
-TARGET_STEPS = 50000  # Start with a small batch to test
-SEQ_LEN = 50         # DreamerV3 prefers sequences
+TARGET_STEPS = 50000 
+SEQ_LEN = 50         
 
 def run_collection():
     if not os.path.exists(SAVE_DIR):
         os.makedirs(SAVE_DIR)
 
+    # Initialize Environment
     env = CarlaEnv()
     obs = env.reset()
     
-    # Storage for the current sequence
     current_seq = {
-        "depth": [],
-        "semantic": [],
-        "goal": [],
-        "vector": [],
-        "action": [],
-        "reward": []
+        "depth": [], "semantic": [], "goal": [], "vector": [],
+        "action": [], "reward": []
     }
 
     print(f"Starting data collection for {TARGET_STEPS} steps...")
 
     for step in range(TARGET_STEPS):
-        # 1. Simple PID-like logic using CARLA Waypoints
-        vehicle_transform = env.vehicle.get_transform()
-        waypoint = env.world.get_map().get_waypoint(vehicle_transform.location)
-        next_waypoint = waypoint.next(2.0)[0] # Look 2 meters ahead
+        # --- 1. EXPERT LOGIC (Updated) ---
+        v_transform = env.vehicle.get_transform()
+        v_loc = v_transform.location
         
-        # Calculate steering angle
-        v_begin = vehicle_transform.location
-        v_end = v_begin + vehicle_transform.get_forward_vector()
-        v_vec = np.array([v_end.x - v_begin.x, v_end.y - v_begin.y])
+        # FIX: Look ahead in the ACTUAL route list, not just "next on map"
+        # We aim at the current target + 1 to be smooth (Lookahead)
+        target_idx = min(env.current_waypoint_index + 2, len(env.route_waypoints) - 1)
+        target_wp = env.route_waypoints[target_idx]
         
-        w_vec = np.array([next_waypoint.transform.location.x - v_begin.x, 
-                          next_waypoint.transform.location.y - v_begin.y])
+        # Calculate Vector to Target
+        v_vec = v_transform.get_forward_vector()
+        w_vec = target_wp.transform.location - v_loc
         
-        dot = np.dot(v_vec, w_vec) / (np.linalg.norm(v_vec) * np.linalg.norm(w_vec))
-        cross = np.cross(v_vec, w_vec)
+        # Normalize (Handle div by zero)
+        w_vec_norm = np.sqrt(w_vec.x**2 + w_vec.y**2) + 1e-5
+        w_vec_x = w_vec.x / w_vec_norm
+        w_vec_y = w_vec.y / w_vec_norm
+        
+        # Calculate Angle (Dot Product & Cross Product)
+        # v_vec is already normalized by CARLA
+        dot = v_vec.x * w_vec_x + v_vec.y * w_vec_y
+        cross = v_vec.x * w_vec_y - v_vec.y * w_vec_x
+        
         angle = np.arccos(np.clip(dot, -1.0, 1.0))
-        if cross < 0: angle *= -1
+        if cross < 0: angle = -angle
         
-        # PID Steering + Constant Throttle
+        # PID Steering
         steer = np.clip(1.5 * angle, -1.0, 1.0)
-        action = np.array([steer, 0.4], dtype=np.float32)
+        
+        # Throttle: -0.2 maps to 0.4 (40%) in your new wrapper
+        action = np.array([steer, -0.2], dtype=np.float32)
 
-        # 2. Step Environment
+        # --- 2. Step Environment ---
         next_obs, reward, done, _ = env.step(action)
         
+        # Update Spectator Camera (Optional, but good for watching)
         spectator = env.world.get_spectator()
-        v_transform = env.vehicle.get_transform()
-        
-        # Calculate position (8m back, 4m up)
-        forward_vec = v_transform.get_forward_vector()
-        back_pos = v_transform.location - (forward_vec * 8.0) + carla.Location(z=4.0)
-        
-        # Update camera
+        back_pos = v_loc - (v_vec * 8.0) + carla.Location(z=4.0)
         spectator.set_transform(carla.Transform(back_pos, v_transform.rotation))
 
-        # 3. Save to sequence buffer
+        # --- 3. Save to Buffer ---
         current_seq["depth"].append(obs["depth"])
         current_seq["semantic"].append(obs["semantic"])
         current_seq["goal"].append(obs["goal"])
@@ -72,7 +73,7 @@ def run_collection():
         current_seq["action"].append(action)
         current_seq["reward"].append(reward)
 
-        # 4. If sequence is full, save to disk
+        # --- 4. Save to Disk ---
         if len(current_seq["action"]) == SEQ_LEN:
             seq_idx = len(os.listdir(SAVE_DIR))
             np.savez_compressed(
@@ -84,14 +85,19 @@ def run_collection():
                 action=np.array(current_seq["action"]),
                 reward=np.array(current_seq["reward"])
             )
-            # Reset local sequence
             for key in current_seq: current_seq[key] = []
 
         obs = next_obs
         
-        if done or step % 500 == 0:
-            print(f"Step {step}/{TARGET_STEPS} | Last Reward: {reward:.2f}")
-            if done: obs = env.reset()
+        # Logging & Reset
+        if (step+1) % 100 == 0:
+            print(f"Step {step+1}/{TARGET_STEPS} | Last Reward: {reward:.2f} | Steer: {steer:.2f}")
+
+        if done: 
+            print(f"Episode Done at Step {step}. Resetting...")
+            obs = env.reset()
+            # Clear buffer on reset to avoid mixing episodes in one sequence
+            for key in current_seq: current_seq[key] = []
 
     print(f"Collection complete. Data saved to {SAVE_DIR}")
     env._cleanup()
