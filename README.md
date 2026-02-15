@@ -38,5 +38,5 @@ tensorboard --logdir=runs
 # Test
 python3 -m test
 
-# 6. Generate Graphs
+# Generate Graphs
 python3 -m utils.plotter

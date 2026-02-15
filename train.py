@@ -15,9 +15,9 @@ from tqdm import tqdm
 # --- Configuration & Hyperparameters ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEQ_LEN = 50 
-PART_A_TRAINING_SIZE = 20000
-PART_B_EPISODE = 500
-PART_B_EPOCH = 1000
+PART_A_TRAINING_SIZE = 10 # 20000
+PART_B_EPISODE = 5 # 5000
+PART_B_EPOCH = 10 # 1000
 BATCH_SIZE = 16
 HORIZON = 25 # 15
 LEARNING_RATE = 3e-4
@@ -72,9 +72,9 @@ def train():
 
     # --- PHASE A: Pre-training (Expert Knowledge) ---
     print("\n[Phase A] Pre-training on Expert PID Data...")
-    if LOAD_PRETRAINED and os.path.exists("checkpoints/world_model/world_model_pretrained.pth"):
+    if LOAD_PRETRAINED and os.path.exists(PHASE_A_MODEL_PATH):
         print("Loading pre-trained World Model...")
-        checkpoint = torch.load("checkpoints/world_model/world_model_pretrained.pth", weights_only=True)
+        checkpoint = torch.load(PHASE_A_MODEL_PATH, weights_only=True)
         encoder.load_state_dict(checkpoint['encoder'])
         rssm.load_state_dict(checkpoint['rssm'])
         decoder.load_state_dict(checkpoint['decoder'])
@@ -112,9 +112,14 @@ def train():
             target_sem = sems.view(-1, 1, 160, 160) / 255.0
             
             # Loss Calculation (Using MSE for Semantics since output is 1 channel scalar)
-            loss_wm = F.mse_loss(recon_depth, target_depth) + \
-                    F.mse_loss(recon_sem, target_sem) + \
-                    rssm.kl_loss(post_z, prior_z) 
+            recon_loss = F.mse_loss(recon_depth, target_depth) + \
+                             F.mse_loss(recon_sem, target_sem)
+                
+            kl_loss = rssm.kl_loss(post_z, prior_z)
+            
+            # 2. SCALE UP the reconstruction loss so it's not ignored
+            # We multiply by 100.0 (or more) to bring 0.001 up to 0.1 range
+            loss_wm = (100.0 * recon_loss) + kl_loss
             
             loss_wm.backward()
             wm_opt.step()
@@ -142,21 +147,25 @@ def train():
     # --- PHASE B: Online Training (Driving & Dreaming) ---
     print("\n[Phase B] Starting Online Interaction...")
     spectator = env.world.get_spectator()
-    if LOAD_PRETRAINED:
-        if os.path.exists(PHASE_B_MODEL_PATH):
-            print("Loading pre-trained Actor/Critic...")
-            ac_checkpoint = torch.load(PHASE_B_MODEL_PATH, weights_only=True)
-            actor.load_state_dict(ac_checkpoint['actor'])
-            critic.load_state_dict(ac_checkpoint['critic'])
-            ac_opt.load_state_dict(ac_checkpoint['ac_opt']) # Load optimizer state for continuity
-            wm_opt.load_state_dict(ac_checkpoint['wm_opt']) # Load world model optimizer to keep "eyes" sharp
-            rssm.load_state_dict(ac_checkpoint['rssm']) # Load RSSM to keep "memory" consistent
-            encoder.load_state_dict(ac_checkpoint['encoder']) # Load Encoder to keep "perception" consistent
-            decoder.load_state_dict(ac_checkpoint['decoder']) # Load Decoder to keep "imagination" consistent
-        else:
-            print("Pre-trained Actor/Critic not found. Starting online training from scratch...")
+    if LOAD_PRETRAINED and os.path.exists(PHASE_B_MODEL_PATH):
+        print("Loading pre-trained Actor/Critic...")
+        ac_checkpoint = torch.load(PHASE_B_MODEL_PATH, weights_only=True)
+        actor.load_state_dict(ac_checkpoint['actor'])
+        critic.load_state_dict(ac_checkpoint['critic'])
+        ac_opt.load_state_dict(ac_checkpoint['ac_opt']) # Load optimizer state for continuity
+        wm_opt.load_state_dict(ac_checkpoint['wm_opt']) # Load world model optimizer to keep "eyes" sharp
+        rssm.load_state_dict(ac_checkpoint['rssm']) # Load RSSM to keep "memory" consistent
+        encoder.load_state_dict(ac_checkpoint['encoder']) # Load Encoder to keep "perception" consistent
+        decoder.load_state_dict(ac_checkpoint['decoder']) # Load Decoder to keep "imagination" consistent
+        global_step = ac_checkpoint.get('global_step', 0)
+        start_episode = ac_checkpoint.get('episode', 0)
+        print(f"Resuming from Step {global_step}, Episode {start_episode}")
+    else:
+        print("Pre-trained Actor/Critic not found. Starting online training from scratch...")
+        global_step = 0
+        start_episode = 0
     
-    for episode in range(PART_B_EPISODE):
+    for episode in range(start_episode + 1, PART_B_EPISODE + start_episode + 1):
         obs = env.reset()
         h = rssm.get_initial_state(1, DEVICE)
         episode_reward = 0
@@ -181,7 +190,7 @@ def train():
                 z = rssm.representation_model(torch.cat([h, embed, g_in], dim=-1)) 
                 action = actor(h, z, g_in)
                 # Add noise that decays over episodes
-                noise_std = max(0.05, 0.4 * (1 - episode / 400)) 
+                noise_std = max(0.05, 0.5 * (1 - (episode - start_episode) / PART_B_EPISODE))
                 action = action + torch.randn_like(action) * noise_std
                 action = torch.clamp(action, -1.0, 1.0)
             
@@ -232,9 +241,14 @@ def train():
                 target_depth = depths.view(-1, 1, 160, 160) / 255.0
                 target_sem = sems.view(-1, 1, 160, 160) / 255.0
                 
-                loss_wm = F.mse_loss(recon_depth, target_depth) + \
-                          F.mse_loss(recon_sem, target_sem) + \
-                          rssm.kl_loss(post_z, prior_z)
+                recon_loss = F.mse_loss(recon_depth, target_depth) + \
+                             F.mse_loss(recon_sem, target_sem)
+                
+                kl_loss = rssm.kl_loss(post_z, prior_z)
+                
+                # 2. SCALE UP the reconstruction loss so it's not ignored
+                # We multiply by 100.0 (or more) to bring 0.001 up to 0.1 range
+                loss_wm = (100.0 * recon_loss) + kl_loss
                 
                 loss_wm.backward()
                 wm_opt.step()
@@ -262,13 +276,26 @@ def train():
                 
                 if step % 100 == 0:
                     with torch.no_grad():
-                        # Stack real and recon side-by-side
-                        vis_depth = torch.cat([target_depth[0:1], recon_depth[0:1]], dim=-1)
-                        vis_depth = (vis_depth - vis_depth.min()) / (vis_depth.max() - vis_depth.min() + 1e-8)
+                        # --- DEPTH VISUALIZATION ---
+                        # Normalize target and recon SEPARATELY so we can see structure in both
+                        t_depth = target_depth[0:1]
+                        r_depth = recon_depth[0:1]
+                        
+                        t_depth = (t_depth - t_depth.min()) / (t_depth.max() - t_depth.min() + 1e-8)
+                        r_depth = (r_depth - r_depth.min()) / (r_depth.max() - r_depth.min() + 1e-8)
+                        
+                        vis_depth = torch.cat([t_depth, r_depth], dim=-1)
                         writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
                         
-                        vis_sem = torch.cat([target_sem[0:1], recon_sem[0:1]], dim=-1)
-                        # We don't need heavy normalization here because Sigmoid already keeps it 0-1
+                        # --- SEMANTIC VISUALIZATION ---
+                        # Since semantic values are tiny (0.0-0.1), we MUST normalize to see them
+                        t_sem = target_sem[0:1]
+                        r_sem = recon_sem[0:1]
+                        
+                        t_sem = (t_sem - t_sem.min()) / (t_sem.max() - t_sem.min() + 1e-8)
+                        r_sem = (r_sem - r_sem.min()) / (r_sem.max() - r_sem.min() + 1e-8)
+                        
+                        vis_sem = torch.cat([t_sem, r_sem], dim=-1)
                         writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
                 
                 pbar_steps.set_postfix({"Rew": f"{episode_reward:.1f}", "WM_Loss": f"{loss_wm.item():.3f}"})
@@ -292,11 +319,13 @@ def train():
             'critic': critic.state_dict(),
             'wm_opt': wm_opt.state_dict(),   # Highly recommended for resuming
             'ac_opt': ac_opt.state_dict(),   # Highly recommended for resuming
+            'global_step': global_step, # Add this
+            'episode': episode          # Add this
         }
         if (episode+1) % SAVE_INTERVAL == 0:  # Save every 50 episodes
             torch.save(checkpoint_data, f"checkpoints/dreamerv3/dreamerv3_ep{episode}.pth")
     
-    torch.save(checkpoint_data, PHASE_B_MODEL_PATH)
+        torch.save(checkpoint_data, PHASE_B_MODEL_PATH)
 
 if __name__ == "__main__":
     train()
