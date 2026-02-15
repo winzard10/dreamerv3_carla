@@ -30,53 +30,6 @@ class CarlaEnv(gym.Env):
         self.vehicle = None
         self.sensors = []
         self.last_data = {"depth": None, "semantic": None}
-
-    # def reset(self):
-    #     self._cleanup()
-    #     self.stuck_ticks = 0
-    #     self.waypoint_reward = 0.0
-        
-    #     settings = self.world.get_settings()
-    #     settings.synchronous_mode = True
-    #     settings.fixed_delta_seconds = 0.05
-    #     self.world.apply_settings(settings)
-
-    #     # --- Spawn Vehicle ---
-    #     bp = self.blueprint_library.find('vehicle.tesla.model3')
-    #     self.map = self.world.get_map() 
-    #     spawn_point = random.choice(self.map.get_spawn_points())
-    #     self.vehicle = self.world.spawn_actor(bp, spawn_point)
-        
-    #     # --- Generate Route ---
-    #     current_w = self.map.get_waypoint(self.vehicle.get_location())
-    #     self.route_waypoints = [current_w]
-    #     for _ in range(5000):
-    #         next_w = self.route_waypoints[-1].next(2.0)[0]
-    #         self.route_waypoints.append(next_w)
-        
-    #     self.current_waypoint_index = 1 # Start aiming for the *next* one
-        
-    #     print(spawn_point, [self.route_waypoints[1].transform.location.x, self.route_waypoints[1].transform.location.y])
-
-    #     # 4. Attach Multi-Modal Sensors
-    #     self._setup_sensors()
-        
-    #     # 5. Tick to initialize data
-    #     max_tries = 100
-    #     tries = 0
-    #     while (self.last_data["depth"] is None or self.last_data["semantic"] is None) and tries < max_tries:
-    #         self.world.tick()
-    #         tries += 1
-        
-    #     for _ in range(15):
-    #         self.world.tick()
-        
-    #     # Ensure we have a valid vehicle transform before the episode starts
-    #     while self.vehicle.get_location().x == 0.0:
-    #         self.world.tick()
-
-    #     self.collision_hist = []
-    #     return self._get_obs()
     
     def reset(self):
         self._cleanup()
