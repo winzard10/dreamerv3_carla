@@ -15,6 +15,7 @@ class CarlaEnv(gym.Env):
         self.blueprint_library = self.world.get_blueprint_library()
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0 # NEW: Track impulse reward
+        self._DISTANCE_TO_CENTERLINE_THRESHOLD = 3.0 # Meters before we consider it "off-road"
         
         # 2. Define Observation and Action Spaces
         self.observation_space = spaces.Dict({
@@ -30,6 +31,53 @@ class CarlaEnv(gym.Env):
         self.sensors = []
         self.last_data = {"depth": None, "semantic": None}
 
+    # def reset(self):
+    #     self._cleanup()
+    #     self.stuck_ticks = 0
+    #     self.waypoint_reward = 0.0
+        
+    #     settings = self.world.get_settings()
+    #     settings.synchronous_mode = True
+    #     settings.fixed_delta_seconds = 0.05
+    #     self.world.apply_settings(settings)
+
+    #     # --- Spawn Vehicle ---
+    #     bp = self.blueprint_library.find('vehicle.tesla.model3')
+    #     self.map = self.world.get_map() 
+    #     spawn_point = random.choice(self.map.get_spawn_points())
+    #     self.vehicle = self.world.spawn_actor(bp, spawn_point)
+        
+    #     # --- Generate Route ---
+    #     current_w = self.map.get_waypoint(self.vehicle.get_location())
+    #     self.route_waypoints = [current_w]
+    #     for _ in range(5000):
+    #         next_w = self.route_waypoints[-1].next(2.0)[0]
+    #         self.route_waypoints.append(next_w)
+        
+    #     self.current_waypoint_index = 1 # Start aiming for the *next* one
+        
+    #     print(spawn_point, [self.route_waypoints[1].transform.location.x, self.route_waypoints[1].transform.location.y])
+
+    #     # 4. Attach Multi-Modal Sensors
+    #     self._setup_sensors()
+        
+    #     # 5. Tick to initialize data
+    #     max_tries = 100
+    #     tries = 0
+    #     while (self.last_data["depth"] is None or self.last_data["semantic"] is None) and tries < max_tries:
+    #         self.world.tick()
+    #         tries += 1
+        
+    #     for _ in range(15):
+    #         self.world.tick()
+        
+    #     # Ensure we have a valid vehicle transform before the episode starts
+    #     while self.vehicle.get_location().x == 0.0:
+    #         self.world.tick()
+
+    #     self.collision_hist = []
+    #     return self._get_obs()
+    
     def reset(self):
         self._cleanup()
         self.stuck_ticks = 0
@@ -46,33 +94,48 @@ class CarlaEnv(gym.Env):
         spawn_point = random.choice(self.map.get_spawn_points())
         self.vehicle = self.world.spawn_actor(bp, spawn_point)
         
-        # --- Generate Route ---
-        current_w = self.map.get_waypoint(self.vehicle.get_location())
+        # --- Generate Route (THE FIX) ---
+        # Do NOT ask self.vehicle.get_location() here. It returns (0,0,0).
+        # Use spawn_point.location directly.
+        current_w = self.map.get_waypoint(spawn_point.location)
         self.route_waypoints = [current_w]
-        for _ in range(5000):
-            next_w = self.route_waypoints[-1].next(2.0)[0]
-            self.route_waypoints.append(next_w)
         
-        self.current_waypoint_index = 1 # Start aiming for the *next* one
+        # Generate the rest of the route
+        for _ in range(5000):
+            # Safe check in case the map ends
+            next_ws = self.route_waypoints[-1].next(2.0)
+            if len(next_ws) > 0:
+                self.route_waypoints.append(next_ws[0])
+            else:
+                break
+
+        self.current_waypoint_index = 1 
 
         # 4. Attach Multi-Modal Sensors
         self._setup_sensors()
         
-        # 5. Tick to initialize data
+        # 5. Stability Ticks (Crucial for Physics)
+        # We tick BEFORE asking for observations so the car actually falls to the ground
+        for _ in range(20):
+            self.world.tick()
+        
+        # 6. Initialize Data
         max_tries = 100
         tries = 0
         while (self.last_data["depth"] is None or self.last_data["semantic"] is None) and tries < max_tries:
             self.world.tick()
             tries += 1
-        
+            
         self.collision_hist = []
         return self._get_obs()
 
     def step(self, action):
+        throttle_val = float((action[1] + 1) / 2) 
+        brake_val = 0.0
         control = carla.VehicleControl(
             steer=float(action[0]),
-            throttle=float(max(0, action[1])),
-            brake=float(max(0, -action[1]))
+            throttle=float(max(0, throttle_val)),
+            brake=float(max(0, brake_val))
         )
         self.vehicle.apply_control(control)
 
@@ -106,10 +169,10 @@ class CarlaEnv(gym.Env):
         # Distance check
         dist = vehicle_loc.distance(target_loc)
         
-        # If within 1.5 meters (generous radius), we hit it!
-        if dist < 1.5:
+        # If within 0.25 meters, we hit it!
+        if dist < 0.25:
             self.current_waypoint_index += 1
-            self.waypoint_reward = 1.0 # The "Cookie" for progress!
+            self.waypoint_reward = 5.0 # The "Cookie" for progress!
             # print(f"Waypoint {self.current_waypoint_index} Reached! (+1.0)")
 
     def _setup_sensors(self):
@@ -174,78 +237,68 @@ class CarlaEnv(gym.Env):
         dx_local =  dx_world * np.cos(yaw) + dy_world * np.sin(yaw)
         dy_local = -dx_world * np.sin(yaw) + dy_world * np.cos(yaw)
         return np.array([dx_local, dy_local], dtype=np.float32)
+    
+    def _get_dist_to_centerline(self):
+        if self.current_waypoint_index < 1:
+            return 0.0
+            
+        A_loc = self.route_waypoints[self.current_waypoint_index - 1].transform.location
+        B_loc = self.route_waypoints[self.current_waypoint_index].transform.location
+        P_loc = self.vehicle.get_location()
+
+        # 1. Vector AP (Car to Start) and AB (Segment Direction)
+        AP = np.array([P_loc.x - A_loc.x, P_loc.y - A_loc.y])
+        AB = np.array([B_loc.x - A_loc.x, B_loc.y - A_loc.y])
+        
+        # 2. Standard CTE Formula using Cross Product
+        # Area of parallelogram / Base = Height (Distance)
+        # We use absolute value because distance is always positive
+        cross_prod = np.abs(AP[0] * AB[1] - AP[1] * AB[0])
+        norm_AB = np.linalg.norm(AB) + 1e-6
+        
+        return cross_prod / norm_AB
         
     def _calculate_reward(self):
         v = self.vehicle.get_velocity()
         speed_kmh = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
         
-        # 1. SPEED
-        if speed_kmh < 25:
-            r_speed = np.sqrt(speed_kmh / 25.0)
-        else:
-            r_speed = 1.0 
+        # 1. CTE (Centerline Distance)
+        cte = self._get_dist_to_centerline()
+        
+        # 2. SPEED (Targeting 25km/h)
+        r_speed = np.sqrt(speed_kmh / 25.0) if speed_kmh < 25 else 1.0 
 
-        # 2. CENTER
-        vehicle_location = self.vehicle.get_location()
-        waypoint = self.map.get_waypoint(vehicle_location)
-        dist_to_center = vehicle_location.distance(waypoint.transform.location)
-        r_center = max(0.0, 1.0 - (dist_to_center / 2.0))
+        # 3. CENTER (Penalty based on CTE)
+        r_center = max(0.0, 1.0 - (cte / self._DISTANCE_TO_CENTERLINE_THRESHOLD))
 
-        # 3. ANGLE
-        vehicle_yaw = self.vehicle.get_transform().rotation.yaw
-        waypoint_yaw = waypoint.transform.rotation.yaw
-        diff = abs(vehicle_yaw - waypoint_yaw) % 360
+        # 4. ANGLE (Alignment with the line segment)
+        target_wp = self.route_waypoints[self.current_waypoint_index]
+        v_yaw = self.vehicle.get_transform().rotation.yaw
+        w_yaw = target_wp.transform.rotation.yaw
+        diff = abs(v_yaw - w_yaw) % 360
         if diff > 180: diff = 360 - diff
         r_angle = max(0.0, 1.0 - (diff / 30.0)) 
 
-        # 4. COLLISION
-        r_collision = 0.0
-        if len(self.collision_hist) > 0:
-            r_collision = -15.0 
-        
-        # 5. STALL
+        # Penalties
+        r_collision = -15.0 if len(self.collision_hist) > 0 else 0.0
         r_stall = -10.0 if self.stuck_ticks >= 100 else 0.0 
-        
-        # 6. IDLE PENALTY
         r_idle = -0.05 if speed_kmh < 1.0 else 0.0
+        r_offroad = -10.0 if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0 
 
-        # 7. OFFROAD
-        r_offroad = 0.0
-        if dist_to_center > 3.0:
-            r_offroad = -10.0 
-
-        # 8. WAYPOINT BONUS [NEW]
-        # This comes from _check_waypoint_completion()
-        r_waypoint = self.waypoint_reward
-
-        # TOTAL
-        total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + r_waypoint
-        
+        total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
         return total_reward
 
     def _check_done(self):
         if self.current_waypoint_index >= len(self.route_waypoints) - 10:
             return True
-    
         if len(self.collision_hist) > 0:
             return True
         
         v = self.vehicle.get_velocity()
         speed = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
-        
-        if speed < 1.0:
-            self.stuck_ticks += 1
-        else:
-            self.stuck_ticks = 0
+        self.stuck_ticks = self.stuck_ticks + 1 if speed < 1.0 else 0
 
-        if self.stuck_ticks > 100:
-            return True
-            
-        vehicle_location = self.vehicle.get_location()
-        waypoint = self.map.get_waypoint(vehicle_location)
-        dist_to_center = vehicle_location.distance(waypoint.transform.location)
-        
-        if dist_to_center > 3.0:
+        if self.stuck_ticks > 100 or self._get_dist_to_centerline() > self._DISTANCE_TO_CENTERLINE_THRESHOLD:
             return True
             
         return False
