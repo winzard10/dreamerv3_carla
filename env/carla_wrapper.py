@@ -1,3 +1,4 @@
+import time
 import carla
 import numpy as np
 import cv2
@@ -33,6 +34,7 @@ class CarlaEnv(gym.Env):
     
     def reset(self):
         self._cleanup()
+        time.sleep(1.0)
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0
         
@@ -122,10 +124,10 @@ class CarlaEnv(gym.Env):
         # Distance check
         dist = vehicle_loc.distance(target_loc)
         
-        # If within 0.25 meters, we hit it!
-        if dist < 0.25:
+        # If within 1.0 meters, we hit it!
+        if dist < 1.0:
             self.current_waypoint_index += 1
-            self.waypoint_reward = 5.0 # The "Cookie" for progress!
+            self.waypoint_reward = 1.0 # The "Cookie" for progress!
             # print(f"Waypoint {self.current_waypoint_index} Reached! (+1.0)")
 
     def _setup_sensors(self):
@@ -155,10 +157,17 @@ class CarlaEnv(gym.Env):
     def _on_collision(self, event):
         self.collision_hist.append(event)
 
+    # def _process_depth(self, image):
+    #     array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+    #     array = np.reshape(array, (image.height, image.width, 4))
+    #     self.last_data["depth"] = array[:, :, 0:1] 
+    
     def _process_depth(self, image):
+        # This turns 24-bit raw depth into a 0-255 grayscale log map
+        image.convert(carla.ColorConverter.LogarithmicDepth) 
         array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         array = np.reshape(array, (image.height, image.width, 4))
-        self.last_data["depth"] = array[:, :, 0:1] 
+        self.last_data["depth"] = array[:, :, 0:1]
 
     def _process_sem(self, image):
         array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
@@ -265,3 +274,4 @@ class CarlaEnv(gym.Env):
             self.vehicle.destroy()
         self.sensors = []
         self.vehicle = None
+        time.sleep(0.5)

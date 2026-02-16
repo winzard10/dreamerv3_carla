@@ -103,7 +103,7 @@ def train():
             # Flatten Batch and Time for Encoder
             B, T, C, H, W = depths.shape
             flat_depth = depths.view(B * T, C, H, W) / 255.0
-            flat_sem = sems.view(B * T, C, H, W) / 255.0
+            flat_sem = sems.view(B * T, C, H, W) / 28.0
             flat_vec = vectors.view(B * T, -1)
             flat_goals = goals.view(B * T, -1)
             
@@ -118,17 +118,37 @@ def train():
             
             # --- FIX: Flatten Targets to match Decoder Output [800, 1, 160, 160] ---
             target_depth = depths.view(-1, 1, 160, 160) / 255.0
-            target_sem = sems.view(-1, 1, 160, 160) / 255.0
+            target_sem = sems.view(-1, 1, 160, 160) / 28.0
+            target_sem = torch.clamp(target_sem, 0.0, 1.0)
             
-            # Loss Calculation (Using MSE for Semantics since output is 1 channel scalar)
-            recon_loss = F.mse_loss(recon_depth, target_depth) + \
-                             F.mse_loss(recon_sem, target_sem)
-                
+            # # Loss Calculation (Using MSE for Semantics since output is 1 channel scalar)
+            # recon_loss = F.mse_loss(recon_depth, target_depth) + \
+            #                  F.mse_loss(recon_sem, target_sem)
+            
+            sem_recon_loss = F.binary_cross_entropy(recon_sem, target_sem)
+            depth_recon_loss = F.mse_loss(recon_depth, target_depth)
+      
             kl_loss = rssm.kl_loss(post_z, prior_z)
+            
+            # --- TEMPORARY SANITY CHECK ---
+            if step_pre == 0:
+                print("\n" + "="*30)
+                print("NUMERICAL VERIFICATION")
+                print(f"Target Depth - Min: {target_depth.min().item():.6f}, Max: {target_depth.max().item():.6f}")
+                print(f"Target Sem   - Min: {target_sem.min().item():.6f}, Max: {target_sem.max().item():.6f}")
+                
+                # Check if the depth looks like noise (raw) or a clear image (logarithmic)
+                # A raw depth map sliced at channel 0 often has a very low mean.
+                print(f"Target Depth - Mean: {target_depth.mean().item():.6f}")
+                
+                # Check if the Recon is truly zero or just very small
+                print(f"Recon Depth  - Max: {recon_depth.max().item():.6f}")
+                print(f"Recon Sem    - Max: {recon_sem.max().item():.6f}")
+                print("="*30 + "\n")
             
             # 2. SCALE UP the reconstruction loss so it's not ignored
             # We multiply by 100.0 (or more) to bring 0.001 up to 0.1 range
-            loss_wm = (100.0 * recon_loss) + kl_loss
+            loss_wm = (1000.0 * (depth_recon_loss + sem_recon_loss)) + kl_loss
             
             loss_wm.backward()
             wm_opt.step()
@@ -185,7 +205,7 @@ def train():
             with torch.no_grad():
                 # Add .copy() to depth, semantic, and vector
                 depth_in = torch.as_tensor(obs['depth'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
-                sem_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
+                sem_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 28.0
                 # Ensure vector is also copied if it comes from numpy
                 vec_val = obs.get('vector', [0,0,0])
                 if isinstance(vec_val, np.ndarray):
@@ -241,7 +261,7 @@ def train():
                 
                 B_dim, T_dim, C, H, W = depths.shape
                 flat_depth = depths.view(B_dim * T_dim, C, H, W) / 255.0
-                flat_sem = sems.view(B_dim * T_dim, C, H, W) / 255.0
+                flat_sem = sems.view(B_dim * T_dim, C, H, W) / 28.0
                 flat_vec = vectors.view(B_dim * T_dim, -1)
                 flat_goals = goals.view(B_dim * T_dim, -1)
                 
@@ -254,16 +274,33 @@ def train():
                 
                 # --- FIX: Flatten Targets ---
                 target_depth = depths.view(-1, 1, 160, 160) / 255.0
-                target_sem = sems.view(-1, 1, 160, 160) / 255.0
+                target_sem = sems.view(-1, 1, 160, 160) / 28.0
+                target_sem = torch.clamp(target_sem, 0.0, 1.0)
                 
-                recon_loss = F.mse_loss(recon_depth, target_depth) + \
-                             F.mse_loss(recon_sem, target_sem)
-                
+                sem_recon_loss = F.binary_cross_entropy(recon_sem, target_sem)
+                depth_recon_loss = F.mse_loss(recon_depth, target_depth)
+         
                 kl_loss = rssm.kl_loss(post_z, prior_z)
+                
+                # # --- TEMPORARY SANITY CHECK ---
+                # if step == 0:
+                #     print("\n" + "="*30)
+                #     print("NUMERICAL VERIFICATION")
+                #     print(f"Target Depth - Min: {target_depth.min().item():.6f}, Max: {target_depth.max().item():.6f}")
+                #     print(f"Target Sem   - Min: {target_sem.min().item():.6f}, Max: {target_sem.max().item():.6f}")
+                    
+                #     # Check if the depth looks like noise (raw) or a clear image (logarithmic)
+                #     # A raw depth map sliced at channel 0 often has a very low mean.
+                #     print(f"Target Depth - Mean: {target_depth.mean().item():.6f}")
+                    
+                #     # Check if the Recon is truly zero or just very small
+                #     print(f"Recon Depth  - Max: {recon_depth.max().item():.6f}")
+                #     print(f"Recon Sem    - Max: {recon_sem.max().item():.6f}")
+                #     print("="*30 + "\n")
                 
                 # 2. SCALE UP the reconstruction loss so it's not ignored
                 # We multiply by 100.0 (or more) to bring 0.001 up to 0.1 range
-                loss_wm = (100.0 * recon_loss) + kl_loss
+                loss_wm = (1000.0 * (depth_recon_loss + sem_recon_loss)) + kl_loss
                 
                 loss_wm.backward()
                 wm_opt.step()
@@ -297,7 +334,7 @@ def train():
                         r_depth = recon_depth[0:1]
                         
                         t_depth = (t_depth - t_depth.min()) / (t_depth.max() - t_depth.min() + 1e-8)
-                        r_depth = (r_depth - r_depth.min()) / (r_depth.max() - r_depth.min() + 1e-8)
+                        r_depth = (r_depth - t_depth.min()) / (t_depth.max() - t_depth.min() + 1e-8)
                         
                         vis_depth = torch.cat([t_depth, r_depth], dim=-1)
                         writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
@@ -308,7 +345,7 @@ def train():
                         r_sem = recon_sem[0:1]
                         
                         t_sem = (t_sem - t_sem.min()) / (t_sem.max() - t_sem.min() + 1e-8)
-                        r_sem = (r_sem - r_sem.min()) / (r_sem.max() - r_sem.min() + 1e-8)
+                        r_sem = (r_sem - t_sem.min()) / (t_sem.max() - t_sem.min() + 1e-8)
                         
                         vis_sem = torch.cat([t_sem, r_sem], dim=-1)
                         writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)

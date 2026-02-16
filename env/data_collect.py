@@ -6,7 +6,7 @@ from env.carla_wrapper import CarlaEnv
 
 # Configuration
 SAVE_DIR = "./data/expert_sequences"
-TARGET_STEPS = 50000 
+TARGET_STEPS = 500 # 50000
 SEQ_LEN = 50         
 
 def run_collection():
@@ -52,7 +52,7 @@ def run_collection():
         if cross < 0: angle = -angle
         
         # PID Steering
-        steer = np.clip(1.5 * angle, -1.0, 1.0)
+        steer = np.clip(0.85 * angle, -1.0, 1.0)
         
         # Throttle: -0.2 maps to 0.4 (40%) in your new wrapper
         action = np.array([steer, -0.2], dtype=np.float32)
@@ -91,7 +91,7 @@ def run_collection():
         
         # Logging & Reset
         if (step+1) % 100 == 0:
-            print(f"Step {step+1}/{TARGET_STEPS} | Last Reward: {reward:.2f} | Steer: {steer:.2f}")
+            print(f"Step {step+1}/{TARGET_STEPS} | Last Reward: {reward:.2f}")
 
         if done: 
             print(f"Episode Done at Step {step}. Resetting...")
