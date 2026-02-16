@@ -6,7 +6,7 @@ from env.carla_wrapper import CarlaEnv
 
 # Configuration
 SAVE_DIR = "./data/expert_sequences"
-TARGET_STEPS = 500 # 50000
+TARGET_STEPS = 50000
 SEQ_LEN = 50         
 
 def run_collection():
