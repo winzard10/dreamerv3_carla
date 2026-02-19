@@ -77,6 +77,17 @@ class RSSM(nn.Module):
             
         return torch.stack(imag_h, dim=1), torch.stack(imag_z, dim=1)
 
-    def kl_loss(self, posteriors, priors, free_nats=1.0): # Added self
-        kl = torch.pow(posteriors - priors, 2).mean()
+    def kl_loss(self, posteriors, priors, free_nats=0.01, alpha=0.8):
+        # 1. KL(Post || Prior) - forcing Memory to match Reality
+        # Detach posteriors so we only move the Priors
+        kl_prior = torch.pow(posteriors.detach() - priors, 2).mean()
+        
+        # 2. KL(Post || Prior) - keeping Reality organized
+        # Detach priors so we only move the Posteriors
+        kl_post = torch.pow(posteriors - priors.detach(), 2).mean()
+        
+        # 3. Balancing: Force memory to learn faster than perception is squashed
+        kl = alpha * kl_prior + (1 - alpha) * kl_post
+        
+        # 4. Use a MUCH smaller free_nats to force visual attention
         return torch.max(kl, torch.tensor(free_nats).to(kl.device))

@@ -20,7 +20,7 @@ PART_B_EPISODE = 5000
 PART_B_EPOCH = 1000
 BATCH_SIZE = 16
 HORIZON = 25
-LEARNING_RATE = 3e-4
+LEARNING_RATE = 8e-5
 LAMBDA = 0.95
 
 LOAD_PRETRAINED = True
@@ -32,19 +32,21 @@ def symlog(x):
     return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
 
 def compute_lambda_returns(rewards, values, discount=0.99, lambd=0.95):
-    """Calculates targets for the Critic inside the 'dream'"""
+    """Calculates grounded targets for the Critic inside the 'dream'"""
     # values shape: [HORIZON, Batch, 1]
     returns = torch.zeros_like(values)
     
-    # The return for the very last step is just the Critic's prediction (Bootstrap)
-    last_v = values[-1]
-    returns[-1] = last_v
+    # The return for the very last step is the Critic's prediction (Bootstrap)
+    # This is the "base" of our recursion
+    returns[-1] = values[-1]
     
-    # Iterate backwards from the second-to-last step (HORIZON - 2) down to 0
-    # This avoids the "index out of bounds" error
-    for t in reversed(range(len(returns) - 1)):
-        returns[t] = rewards[t] + discount * ((1 - lambd) * values[t+1] + lambd * last_v)
-        last_v = returns[t]
+    # Iterate backwards from the second-to-last step down to 0
+    for t in reversed(range(returns.shape[0] - 1)):
+        # G_t = reward + discount * ((1-lambda) * Next_Value + lambda * Next_Return)
+        returns[t] = rewards[t] + discount * (
+            (1 - lambd) * values[t+1] + 
+            lambd * returns[t+1]
+        )
         
     return returns
 
@@ -77,7 +79,7 @@ def train():
                               list(rssm.parameters()) + 
                               list(decoder.parameters()), lr=LEARNING_RATE)
     ac_opt = torch.optim.Adam(list(actor.parameters()) + 
-                              list(critic.parameters()), lr=8e-5)
+                              list(critic.parameters()), lr=3e-5, weight_decay=1e-4)
 
     # --- PHASE A: Pre-training (Expert Knowledge) ---
     print("\n[Phase A] Pre-training on Expert PID Data...")
@@ -128,7 +130,7 @@ def train():
             sem_recon_loss = F.binary_cross_entropy(recon_sem, target_sem)
             depth_recon_loss = F.mse_loss(recon_depth, target_depth)
       
-            kl_loss = rssm.kl_loss(post_z, prior_z)
+            kl_loss = rssm.kl_loss(post_z, prior_z, free_nats=0.001)
             
             # --- TEMPORARY SANITY CHECK ---
             if step_pre == 0:
@@ -145,17 +147,23 @@ def train():
                 print(f"Recon Depth  - Max: {recon_depth.max().item():.6f}")
                 print(f"Recon Sem    - Max: {recon_sem.max().item():.6f}")
                 print("="*30 + "\n")
+                
+            pred_rewards = rssm.reward_model(torch.cat([post_h, post_z], dim=-1))
+            reward_loss = F.mse_loss(pred_rewards, symlog(rewards.unsqueeze(-1)))
             
             # 2. SCALE UP the reconstruction loss so it's not ignored
             # We multiply by 100.0 (or more) to bring 0.001 up to 0.1 range
-            loss_wm = (1000.0 * (depth_recon_loss + sem_recon_loss)) + kl_loss
+            loss_wm = 1000.0*depth_recon_loss + 10.0*sem_recon_loss + kl_loss + 2.0 * reward_loss
             
             loss_wm.backward()
             wm_opt.step()
             
             if step_pre % 10 == 0:
                 writer.add_scalar("Pretrain/WM_Loss", loss_wm.item(), step_pre)
+                writer.add_scalar("Pretrain/Depth_Recon_Loss", depth_recon_loss.item(), step_pre)
+                writer.add_scalar("Pretrain/Semantic_Recon_Loss", sem_recon_loss.item(), step_pre)
                 writer.add_scalar("Pretrain/KL_Loss", rssm.kl_loss(post_z, prior_z).item(), step_pre)
+                writer.add_scalar("Pretrain/Reward_Loss", reward_loss.item(), step_pre)
             
             pbar_pre.set_postfix({"WM_Loss": f"{loss_wm.item():.4f}"})
         
@@ -255,76 +263,73 @@ def train():
 
             # 2. Update Loop
             if step % 5 == 0 and buffer.idx > BATCH_SIZE:
+                # --- PHASE B1: World Model Learning (Learning from Buffer) ---
                 depths, sems, vectors, goals, actions, rewards, _ = buffer.sample(BATCH_SIZE)
                 
                 wm_opt.zero_grad()
                 
                 B_dim, T_dim, C, H, W = depths.shape
-                flat_depth = depths.view(B_dim * T_dim, C, H, W) / 255.0
-                flat_sem = sems.view(B_dim * T_dim, C, H, W) / 28.0
-                flat_vec = vectors.view(B_dim * T_dim, -1)
-                flat_goals = goals.view(B_dim * T_dim, -1)
-                
-                flat_embeds = encoder(flat_depth, flat_sem, flat_vec, flat_goals)
-                embeds = flat_embeds.view(B_dim, T_dim, -1)
-                
-                (post_h, post_z), (prior_h, prior_z) = rssm.observe_sequence(embeds, actions, goals)
-                
-                recon_depth, recon_sem = decoder(post_h, post_z)
-                
-                # --- FIX: Flatten Targets ---
+                # Normalize and prepare targets
                 target_depth = depths.view(-1, 1, 160, 160) / 255.0
-                target_sem = sems.view(-1, 1, 160, 160) / 28.0
-                target_sem = torch.clamp(target_sem, 0.0, 1.0)
+                target_sem = torch.clamp(sems.view(-1, 1, 160, 160) / 28.0, 0.0, 1.0)
                 
-                sem_recon_loss = F.binary_cross_entropy(recon_sem, target_sem)
+                # Forward Pass: Perception
+                flat_embeds = encoder(target_depth, target_sem, 
+                                     vectors.view(B_dim * T_dim, -1), 
+                                     goals.view(B_dim * T_dim, -1))
+                
+                # Forward Pass: Dynamics
+                (post_h, post_z), (prior_h, prior_z) = rssm.observe_sequence(flat_embeds.view(B_dim, T_dim, -1), actions, goals)
+                
+                # 1. Reconstruction Losses
+                recon_depth, recon_sem = decoder(post_h, post_z)
                 depth_recon_loss = F.mse_loss(recon_depth, target_depth)
-         
-                kl_loss = rssm.kl_loss(post_z, prior_z)
+                sem_recon_loss = F.binary_cross_entropy(recon_sem, target_sem)
                 
-                # # --- TEMPORARY SANITY CHECK ---
-                # if step == 0:
-                #     print("\n" + "="*30)
-                #     print("NUMERICAL VERIFICATION")
-                #     print(f"Target Depth - Min: {target_depth.min().item():.6f}, Max: {target_depth.max().item():.6f}")
-                #     print(f"Target Sem   - Min: {target_sem.min().item():.6f}, Max: {target_sem.max().item():.6f}")
-                    
-                #     # Check if the depth looks like noise (raw) or a clear image (logarithmic)
-                #     # A raw depth map sliced at channel 0 often has a very low mean.
-                #     print(f"Target Depth - Mean: {target_depth.mean().item():.6f}")
-                    
-                #     # Check if the Recon is truly zero or just very small
-                #     print(f"Recon Depth  - Max: {recon_depth.max().item():.6f}")
-                #     print(f"Recon Sem    - Max: {recon_sem.max().item():.6f}")
-                #     print("="*30 + "\n")
+                # 2. KL Loss (Dynamics regularity)
+                kl_loss = rssm.kl_loss(post_z, prior_z, free_nats=0.001)
                 
-                # 2. SCALE UP the reconstruction loss so it's not ignored
-                # We multiply by 100.0 (or more) to bring 0.001 up to 0.1 range
-                loss_wm = (1000.0 * (depth_recon_loss + sem_recon_loss)) + kl_loss
+                # 3. Reward Model Loss (CRITICAL: Learning what is 'good' and 'bad')
+                # We use symlog here because the Critic later uses symlog rewards
+                pred_rewards = rssm.reward_model(torch.cat([post_h, post_z], dim=-1))
+                reward_loss = F.mse_loss(pred_rewards, symlog(rewards.unsqueeze(-1)))
+                
+                # TOTAL WM LOSS: Balanced with the weights we calculated
+                loss_wm = 1000.0*depth_recon_loss + 10.0*sem_recon_loss + kl_loss + 2.0*reward_loss
                 
                 loss_wm.backward()
                 wm_opt.step()
                 
+                # --- PHASE B2: Actor/Critic Imagination (Learning from Dreams) ---
+                # We detach start states to prevent Critic gradients from changing the World Model
                 start_h = post_h[:, -1].detach() 
                 start_z = post_z[:, -1].detach()
+                current_goals = goals[:, -1].detach()
 
-                # --- UPDATE IMAGINATION ---
                 ac_opt.zero_grad()
-                imag_states_h, imag_states_z = rssm.imagine(start_h, start_z, goals[:, -1], actor)
+                imag_h, imag_z = rssm.imagine(start_h, start_z, current_goals, actor)
                 
-                imag_rewards = symlog(rssm.predict_reward(imag_states_h, imag_states_z))
-                imag_values = critic(imag_states_h, imag_states_z)
+                # Use the Reward Model we just trained to score the dream
+                imag_rewards = rssm.predict_reward(imag_h, imag_z) # Already symlog'd by the model now
+                imag_rewards = torch.clamp(imag_rewards, min=-3.0, max=1.1) # Clamp to prevent extreme values that can destabilize training
+                imag_values = critic(imag_h, imag_z)
                 
+                # Calculate Lambda-Returns for the Critic target
                 targets = compute_lambda_returns(imag_rewards, imag_values)
-                loss_actor = -targets.mean()
-                loss_critic = F.mse_loss(critic(imag_states_h, imag_states_z), targets.detach())
+                
+                loss_actor = -targets.mean() # Maximize imagined rewards
+                loss_critic = F.mse_loss(critic(imag_h, imag_z), targets.detach())
                 
                 (loss_actor + loss_critic).backward()
                 ac_opt.step()
                 
                 writer.add_scalar("Train/WM_Loss", loss_wm.item(), global_step)
+                writer.add_scalar("Train/Depth_Recon_Loss", depth_recon_loss.item(), global_step)
+                writer.add_scalar("Train/Semantic_Recon_Loss", sem_recon_loss.item(), global_step)
+                writer.add_scalar("Train/KL_Loss", kl_loss.item(), global_step)
                 writer.add_scalar("Train/Actor_Loss", loss_actor.item(), global_step)
                 writer.add_scalar("Train/Critic_Loss", loss_critic.item(), global_step)
+                writer.add_scalar("Train/Reward_Loss", reward_loss.item(), global_step)
                 
                 if step % 100 == 0:
                     with torch.no_grad():
