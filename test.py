@@ -9,7 +9,7 @@ from models.actor_critic import Actor
 # Configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # TOWN = 'Town02'
-MODEL_PATH = "./checkpoints/dreamerv3/dreamerv3_latest.pth" # './checkpoints/dreamer_v3_final.pth'
+MODEL_PATH = "./checkpoints/dreamerv3/dreamerv3_ep899.pth" # './checkpoints/dreamer_v3_final.pth'
 
 def test(num_episodes=5):
     env = CarlaEnv()
@@ -61,9 +61,11 @@ def test(num_episodes=5):
         while not done:
             with torch.no_grad():
                 d_in = torch.as_tensor(obs['depth'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
-                s_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 255.0
+                s_in = torch.as_tensor(obs['semantic'].copy()).to(DEVICE).float().permute(2,0,1).unsqueeze(0) / 28.0
                 v_in = torch.as_tensor(obs['vector'].copy()).to(DEVICE).float().unsqueeze(0)
                 g_in = torch.as_tensor(obs['goal'].copy()).to(DEVICE).float().unsqueeze(0) # NEW
+                
+                print(f"Goal Input: {g_in}") 
 
                 h = rssm.gru(torch.cat([z, prev_action], dim=-1), h)
                 
@@ -71,6 +73,7 @@ def test(num_episodes=5):
                 embed = encoder(d_in, s_in, v_in, g_in)
                 z = rssm.representation_model(torch.cat([h, embed, g_in], dim=-1))
                 action = actor(h, z, g_in)
+                print(f"Action: {action.cpu().numpy()[0]}")
                 prev_action = action # Store for next loop
             
             # Step Environment
