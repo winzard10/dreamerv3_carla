@@ -33,40 +33,47 @@ class SequenceBuffer:
         if self.idx == 0: self.full = True
 
     def sample(self, batch_size):
-        high = self.capacity - self.seq_len if self.full else self.idx - self.seq_len
-        if high <= 0:
+        # 1. Determine the search range based on whether the buffer is full
+        max_idx = self.capacity if self.full else self.idx
+        
+        # We need at least seq_len steps to create one sequence
+        if max_idx < self.seq_len:
             return None
 
-        # We need starts where dones[start : start+seq_len-1] has NO True
-        # (seq_len-1 so the transition within the sequence is valid)
-        window = self.seq_len - 1
-        dones = self.dones[:high + window]  # enough length for sliding windows
-
-        # Count dones in each window; valid starts have count==0
-        done_counts = np.convolve(dones.astype(np.int32), np.ones(window, dtype=np.int32), mode="valid")
-        valid_starts = np.where(done_counts == 0)[0]
-
-        if len(valid_starts) < batch_size:
-            return None  # or sample with replacement, or reduce batch size
-
-        start_indices = np.random.choice(valid_starts, size=batch_size, replace=False)
-
         obs_depth, obs_sem, veccs, goals, acts, rews, terms = [], [], [], [], [], [], []
-        for start in start_indices:
+        
+        attempts = 0
+        while len(obs_depth) < batch_size and attempts < 1000: # Increase search budget
+            attempts += 1
+            # 2. Pick a random start index that leaves room for a full sequence
+            start = np.random.randint(0, max_idx - self.seq_len)
             end = start + self.seq_len
+            
+            # 3. Validity Check: Does this window cross an episode boundary?
+            # We check if any 'done' occurs in the first T-1 steps of the sequence.
+            # If a 'done' is at the very last index, the sequence is still valid.
+            if np.any(self.dones[start : end - 1]):
+                continue
+            
+            # 4. Collect valid sequence data
             obs_depth.append(self.depths[start:end])
             obs_sem.append(self.semantics[start:end])
-            veccs.append(self.vectors[start:end])  # FIXED
+            veccs.append(self.vectors[start:end])
             goals.append(self.goals[start:end])
             acts.append(self.actions[start:end])
             rews.append(self.rewards[start:end])
             terms.append(self.dones[start:end])
 
+        # If we couldn't find enough valid sequences, return None
+        if len(obs_depth) < batch_size:
+            return None
+
+        # 5. Convert to Tensors
         to_torch = lambda x: torch.as_tensor(np.array(x), device=self.device).float()
 
         return (
-            to_torch(obs_depth).permute(0, 1, 4, 2, 3),
-            to_torch(obs_sem).permute(0, 1, 4, 2, 3),
+            to_torch(obs_depth).permute(0, 1, 4, 2, 3), # [B, T, C, H, W]
+            to_torch(obs_sem).permute(0, 1, 4, 2, 3),   # [B, T, C, H, W]
             to_torch(veccs),
             to_torch(goals),
             to_torch(acts),
@@ -99,4 +106,3 @@ class SequenceBuffer:
                     data["reward"][i],
                     done
                 )
-            print(f"Loaded expert data into buffer. Current size: {self.idx if not self.full else self.capacity}")

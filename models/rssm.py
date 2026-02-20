@@ -73,7 +73,8 @@ class RSSM(nn.Module):
         return logits_flat.view(*logits_flat.shape[:-1], self.C, self.K)
 
     def flatten_stoch(self, stoch: torch.Tensor) -> torch.Tensor:
-        # [..., C, K] -> [..., C*K]
+        # stoch can be [B, T, C, K] or [B, C, K]
+        # This keeps everything except the last two dims and merges them
         return stoch.reshape(*stoch.shape[:-2], self.stoch_dim)
 
     def _unimix_probs(self, probs: torch.Tensor) -> torch.Tensor:
@@ -101,17 +102,34 @@ class RSSM(nn.Module):
     def straight_through_onehot_from_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """
         logits: [..., C, K]
-        Returns ST onehot sample with probabilities defined by unimixed softmax(logits).
+        returns: [..., C, K] straight-through onehot sample (grad through probs)
         """
+        # sample hard onehot
+        dist = torch.distributions.Categorical(logits=logits)
+        idx = dist.sample()  # [..., C]
+        onehot = F.one_hot(idx, self.K).to(logits.dtype)  # [..., C, K]
+
+        # soft probs (with unimix)
         probs = F.softmax(logits, dim=-1)
         probs = self._unimix_probs(probs)
+        probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
 
-        # sample from the *actual* probs (after unimix)
+        # straight-through: forward hard, backward soft
+        return onehot + probs - probs.detach()
+
+
+    def straight_through_onehot(self, probs: torch.Tensor) -> torch.Tensor:
+        """
+        probs: [..., C, K] (assumed normalized)
+        returns: [..., C, K] straight-through onehot sample (grad through probs)
+        """
+        probs = self._unimix_probs(probs)
+        probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
+
         dist = torch.distributions.Categorical(probs=probs)
-        idx = dist.sample()                              # [..., C]
-        onehot = F.one_hot(idx, self.K).to(logits.dtype) # [..., C, K]
+        idx = dist.sample()  # [..., C]
+        onehot = F.one_hot(idx, self.K).to(probs.dtype)
 
-        # straight-through trick
         return onehot + probs - probs.detach()
 
     # ----------------------------
@@ -120,129 +138,151 @@ class RSSM(nn.Module):
     def initial(self, batch_size: int, device=None):
         device = device or next(self.parameters()).device
         deter = torch.zeros(batch_size, self.deter_dim, device=device)
-        # uniform logits => uniform probs; ST sample is fine
-        init_logits = torch.zeros(batch_size, self.C, self.K, device=device)
-        stoch = self.straight_through_onehot_from_logits(init_logits)
+        probs = torch.full((batch_size, self.C, self.K), 1.0 / self.K, device=device)
+        stoch = self.straight_through_onehot(probs)          # [B,C,K]
         return deter, stoch
 
     # ----------------------------
     # One-step transitions
     # ----------------------------
-    def img_step(self, prev_deter: torch.Tensor, prev_stoch: torch.Tensor, action: torch.Tensor):
-        """
-        Prior transition:
-          h_t = GRU([prev_stoch_flat, action], prev_deter)
-          z_t ~ p(z_t | h_t)
-        Returns:
-          deter: [B, D]
-          stoch: [B, C, K]
-          prior_logits_flat: [B, C*K]
-        """
-        prev_stoch_flat = self.flatten_stoch(prev_stoch)
-        deter = self.gru(torch.cat([prev_stoch_flat, action], dim=-1), prev_deter)
 
-        prior_logits_flat = self.prior_net(deter)              # [B, C*K]
-        prior_logits = self._reshape_logits(prior_logits_flat) # [B, C, K]
-        prior_stoch = self.straight_through_onehot_from_logits(prior_logits)
+    def obs_step(self, prev_deter, prev_stoch, action, embed, goal):
+        # # --- DEBUG PRINTS ---
+        # # Only print on the first step of the first batch to avoid flooding
+        # if not hasattr(self, '_debug_done'):
+        #     print("\n" + "="*50)
+        #     print("SHAPE DEBUGGER (Inside obs_step)")
+        #     print(f"prev_deter shape: {prev_deter.shape}")
+        #     print(f"prev_stoch shape: {prev_stoch.shape}")
+        #     print(f"action shape:     {action.shape}")
+        #     print(f"embed shape:      {embed.shape}")
+        #     print(f"goal shape:       {goal.shape}")
+            
+        #     prev_stoch_flat_test = self.flatten_stoch(prev_stoch)
+        #     print(f"prev_stoch_flat:  {prev_stoch_flat_test.shape}")
+        #     print("="*50 + "\n")
+        #     self._debug_done = True
+        # # --------------------
+        # 1. Capture the current batch size explicitly
+        B = prev_deter.shape[0]
 
-        return deter, prior_stoch, prior_logits_flat
+        # 2. Flatten stoch while FORCING it to keep the batch dimension
+        # This prevents [16, 32, 32] from becoming [16384]
+        prev_stoch_flat = self.flatten_stoch(prev_stoch).view(B, -1)
+        
+        # 3. Ensure action, embed, and goal also respect the batch dimension
+        action_in = action.view(B, -1)
+        embed_in = embed.view(B, -1)
+        goal_in = goal.view(B, -1)
+        deter_in = prev_deter.view(B, -1)
+            
+        # 4. Now cat is safe: [16, 1024] + [16, 2] -> [16, 1026]
+        x = torch.cat([prev_stoch_flat, action_in], dim=-1)
+        
+        # 5. Update GRU
+        deter = self.gru(x, deter_in)
 
-    def obs_step(
-        self,
-        prev_deter: torch.Tensor,
-        prev_stoch: torch.Tensor,
-        action: torch.Tensor,
-        embed: torch.Tensor,
-        goal: torch.Tensor,
-    ):
-        """
-        Posterior update:
-          deter = GRU transition
-          prior_logits_flat = prior(deter)
-          post_logits_flat  = post(deter, embed, goal)
-          z_post ~ q(z | ...)
-        Returns:
-          deter, post_stoch, post_logits_flat, prior_logits_flat
-        """
-        prev_stoch_flat = self.flatten_stoch(prev_stoch)
-        deter = self.gru(torch.cat([prev_stoch_flat, action], dim=-1), prev_deter)
+        prior_logits_flat = self.prior_net(deter) 
 
-        prior_logits_flat = self.prior_net(deter)
-        post_in = torch.cat([deter, embed, goal], dim=-1)
+        # 6. Cat for posterior: [16, 512] + [16, 1024] + [16, 2]
+        post_in = torch.cat([deter, embed_in, goal_in], dim=-1)
         post_logits_flat = self.post_net(post_in)
-
         post_logits = self._reshape_logits(post_logits_flat)
         post_stoch = self.straight_through_onehot_from_logits(post_logits)
 
         return deter, post_stoch, post_logits_flat, prior_logits_flat
 
+    def img_step(self, prev_deter, prev_stoch, action):
+        B = prev_deter.shape[0]
+        prev_stoch_flat = self.flatten_stoch(prev_stoch).view(B, -1)
+        
+        # Ensure batch dimension is preserved
+        deter_in = prev_deter.view(B, -1)
+        action_in = action.view(B, -1)
+
+        x = torch.cat([prev_stoch_flat, action_in], dim=-1)
+        deter = self.gru(x, deter_in)
+
+        prior_logits_flat = self.prior_net(deter)
+        prior_logits = self._reshape_logits(prior_logits_flat)
+        prior_stoch = self.straight_through_onehot_from_logits(prior_logits)
+        return deter, prior_stoch, prior_logits_flat
+    
+    def imagine(self, start_deter: torch.Tensor, start_stoch: torch.Tensor, actor, goal: torch.Tensor, horizon: int):
+        deter = start_deter
+        stoch = start_stoch
+
+        deters, stochs, ents = [], [], [] # Added ents list
+
+        for _ in range(horizon):
+            stoch_flat = self.flatten_stoch(stoch)
+            
+            # 1. The Actor usually returns (action, log_prob, entropy, mode)
+            # We need that 3rd value: index [2]
+            action_out = actor(deter, stoch_flat, goal)
+            
+            action = action_out[0]
+            entropy = action_out[2] # Extract the entropy tensor
+
+            deter, stoch, _ = self.img_step(deter, stoch, action)
+
+            deters.append(deter)
+            stochs.append(stoch)
+            ents.append(entropy) # Store it
+
+        return {
+            "deter": torch.stack(deters, dim=1),
+            "stoch": torch.stack(stochs, dim=1),
+            "ent": torch.stack(ents, dim=1),     # Return it to train.py
+        }
+
     # ----------------------------
     # Rollouts over data
     # ----------------------------
     def observe(self, embeds: torch.Tensor, actions: torch.Tensor, goals: torch.Tensor, resets=None):
-        """
-        embeds:  [B, T, E]
-        actions: [B, T, A]
-        goals:   [B, T, G]
-        resets:  [B, T] bool (optional): reset before step t
-        """
         B, T, _ = embeds.shape
         device = embeds.device
 
+        # Initialize hidden states [B, D] and [B, C, K]
         deter, stoch = self.initial(B, device=device)
 
         deters, stochs, post_logits, prior_logits = [], [], [], []
 
         for t in range(T):
             if resets is not None:
-                r = resets[:, t].to(device=device).float().unsqueeze(-1)  # [B,1]
+                # resets is [B, T]. Indexing [:, t] gives [B].
+                # We MUST ensure r is [B, 1] for broadcasting.
+                r = resets[:, t].to(device=device).float().view(B, 1) 
                 keep = 1.0 - r
+                
+                # Get fresh initial states for just this batch size
                 init_d, init_s = self.initial(B, device=device)
+                
+                # Apply reset: keep old state if r=0, use new state if r=1
                 deter = deter * keep + init_d * r
-                stoch = stoch * keep[:, None, None] + init_s * r[:, None, None]
+                # stoch is [B, C, K], so r needs to be [B, 1, 1]
+                stoch = stoch * keep.view(B, 1, 1) + init_s * r.view(B, 1, 1)
+
+            # Ensure inputs to obs_step are strictly 2D [B, Features]
+            # This prevents the 16386 error
+            cur_action = actions[:, t].view(B, -1)
+            cur_embed = embeds[:, t].view(B, -1)
+            cur_goal = goals[:, t].view(B, -1)
 
             deter, stoch, post_l, prior_l = self.obs_step(
-                deter, stoch, actions[:, t], embeds[:, t], goals[:, t]
+                deter, stoch, cur_action, cur_embed, cur_goal
             )
             deters.append(deter)
             stochs.append(stoch)
             post_logits.append(post_l)
             prior_logits.append(prior_l)
-
-        return {
-            "deter": torch.stack(deters, dim=1),         # [B,T,D]
-            "stoch": torch.stack(stochs, dim=1),         # [B,T,C,K]
-            "post_logits": torch.stack(post_logits, dim=1),   # [B,T,C*K]
-            "prior_logits": torch.stack(prior_logits, dim=1), # [B,T,C*K]
-        }
-
-    def imagine(self, start_deter: torch.Tensor, start_stoch: torch.Tensor, actor, goal: torch.Tensor, horizon: int):
-        """
-        Dream rollout using prior dynamics only.
-        Returns:
-          deter: [B, H, D]
-          stoch: [B, H, C, K]
-          ent:   [B, H]
-        """
-        deter = start_deter
-        stoch = start_stoch
-
-        deters, stochs, ents = [], [], []
-
-        for _ in range(horizon):
-            stoch_flat = self.flatten_stoch(stoch)
-            action, logp, ent, _ = actor(deter, stoch_flat, goal, sample=True)
-
-            deter, stoch, _ = self.img_step(deter, stoch, action)
-
-            deters.append(deter)
-            stochs.append(stoch)
-            ents.append(ent)
+            # print(f"DEBUG Loop t={t}: deter={deter.shape}, stoch={stoch.shape}, action={actions[:,t].shape}")
 
         return {
             "deter": torch.stack(deters, dim=1),
             "stoch": torch.stack(stochs, dim=1),
-            "ent": torch.stack(ents, dim=1),
+            "post_logits": torch.stack(post_logits, dim=1),
+            "prior_logits": torch.stack(prior_logits, dim=1),
         }
 
     # ----------------------------

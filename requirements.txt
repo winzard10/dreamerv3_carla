@@ -12,6 +12,7 @@ numpy<2.0.0
 scipy
 pandas
 matplotlib
+moviepy
 
 # --- Reinforcement Learning ---
 gymnasium
