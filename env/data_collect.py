@@ -20,7 +20,7 @@ def run_collection():
     
     current_seq = {
         "depth": [], "semantic": [], "goal": [], "vector": [],
-        "action": [], "reward": []
+        "action": [], "reward": [], "done": []
     }
 
     print(f"Starting data collection for {TARGET_STEPS} steps...")

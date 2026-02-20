@@ -159,11 +159,6 @@ class CarlaEnv(gym.Env):
     
     def _on_collision(self, event):
         self.collision_hist.append(event)
-
-    # def _process_depth(self, image):
-    #     array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-    #     array = np.reshape(array, (image.height, image.width, 4))
-    #     self.last_data["depth"] = array[:, :, 0:1] 
     
     def _process_depth(self, image):
         # This turns 24-bit raw depth into a 0-255 grayscale log map
@@ -171,11 +166,6 @@ class CarlaEnv(gym.Env):
         array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         array = np.reshape(array, (image.height, image.width, 4))
         self.last_data["depth"] = array[:, :, 0:1]
-
-    # def _process_sem(self, image):
-    #     array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-    #     array = np.reshape(array, (image.height, image.width, 4))
-    #     self.last_data["semantic"] = array[:, :, 2:3] 
     
     def _process_sem(self, image):
         # Convert to raw labels (NOT CityScapesPalette)
@@ -189,7 +179,9 @@ class CarlaEnv(gym.Env):
         sem_id = array[:, :, 2:3]  # uint8 IDs
 
         self.last_data["semantic"] = sem_id
-        print("sem min/max:", sem_id.min(), sem_id.max(), "unique:", len(np.unique(sem_id)))
+        # if getattr(self, "_sem_dbg", 0) % 50 == 0:
+        #     print("sem min/max:", sem_id.min(), sem_id.max(), "unique:", len(np.unique(sem_id)))
+        # self._sem_dbg = getattr(self, "_sem_dbg", 0) + 1
 
     def _get_obs(self):
         # NOTE: Waypoint index logic moved to _check_waypoint_completion
