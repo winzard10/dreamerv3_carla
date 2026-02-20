@@ -567,6 +567,7 @@ def main():
                 if global_step % 20 == 0:
                     writer.add_scalar("Train/wm_loss", wm_loss.item(), global_step)
                     writer.add_scalar("Train/depth_loss", depth_loss.item(), global_step)
+                    writer.add_scalar("Train/sem_loss", sem_loss.item(), global_step)
                     writer.add_scalar("Train/kl_loss", kl_loss.item(), global_step)
                     writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
@@ -622,6 +623,38 @@ def main():
                         
                 #         # 4. Add to TensorBoard at 5 frames per second
                 #         writer.add_video("Visuals/Dreamed_Depth", video_tensor, global_step, fps=5)
+                
+                if global_step % 100 == 0:
+                    with torch.no_grad():
+                        # --- 1. PREPARE THE RAW DATA (First image in the batch) ---
+                        # depth_in is [B*T, 1, 160, 160], sem_ids is [B*T, 160, 160]
+                        # recon_depth is [B*T, 1, 160, 160], sem_logits is [B*T, 28, 160, 160]
+                        
+                        # --- 2. DEPTH VISUALIZATION ---
+                        t_depth = depth_in[0:1] # Ground Truth
+                        r_depth = recon_depth[0:1] # Reconstruction
+                        
+                        # Concatenate horizontally (GT | Recon)
+                        vis_depth = torch.cat([t_depth, r_depth], dim=-1) # [1, 1, 160, 320]
+                        writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
+                        
+                        # --- 3. SEMANTIC VISUALIZATION ---
+                        # Convert Logits to IDs: [1, 28, 160, 160] -> [1, 160, 160]
+                        r_sem_ids = torch.argmax(sem_logits[0:1], dim=1) 
+                        t_sem_ids = sem_ids[0:1]
+                        
+                        # Normalize IDs to [0, 1] range for visualization (float)
+                        # 27 is the max class index (NUM_CLASSES - 1)
+                        t_sem_vis = t_sem_ids.float() / 27.0
+                        r_sem_vis = r_sem_ids.float() / 27.0
+                        
+                        # Add channel dimension back for add_image: [1, 160, 160]
+                        t_sem_vis = t_sem_vis.unsqueeze(0)
+                        r_sem_vis = r_sem_vis.unsqueeze(0)
+                        
+                        # Concatenate horizontally (GT | Recon)
+                        vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
+                        writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
                 
                 pbar_steps.set_postfix({"rew": f"{episode_reward:.1f}", "act_L": f"{actor_loss.item():.2f}"})
 
