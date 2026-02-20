@@ -67,17 +67,16 @@ class Actor(nn.Module):
 
         dist = torch.distributions.Normal(mean, std)
 
-        raw = dist.rsample()  # always sample for entropy/logprob math
-        action = torch.tanh(raw)
+        if sample:
+            raw = dist.rsample()
+        else:
+            raw = mean  # deterministic
 
+        action = torch.tanh(raw)
         log_det = 2.0 * (math.log(2.0) - raw - F.softplus(-2.0 * raw))
         log_prob = (dist.log_prob(raw) - log_det).sum(dim=-1)
-
-        entropy = -log_prob  # "true" squashed entropy (MC estimate)
-
+        entropy = -log_prob
         mean_action = torch.tanh(mean)
-        if not sample:
-            action = mean_action
         return action, log_prob, entropy, mean_action
 
 class Critic(nn.Module):

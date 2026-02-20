@@ -69,17 +69,18 @@ class SequenceBuffer:
             return None
 
         # 5. Convert to Tensors
-        to_torch = lambda x: torch.as_tensor(np.array(x), device=self.device).float()
+        depth = torch.as_tensor(np.array(obs_depth), device=self.device, dtype=torch.uint8)  # [B,T,H,W,1]
+        sem   = torch.as_tensor(np.array(obs_sem),   device=self.device, dtype=torch.uint8)
+        vec   = torch.as_tensor(np.array(veccs),     device=self.device, dtype=torch.float32)
+        goal  = torch.as_tensor(np.array(goals),     device=self.device, dtype=torch.float32)
+        act   = torch.as_tensor(np.array(acts),      device=self.device, dtype=torch.float32)
+        rew   = torch.as_tensor(np.array(rews),      device=self.device, dtype=torch.float32)
+        done  = torch.as_tensor(np.array(terms),     device=self.device, dtype=torch.bool)
+        
+        depth = depth.permute(0,1,4,2,3).float()  # float only here if you want
+        sem   = sem.permute(0,1,4,2,3)  
 
-        return (
-            to_torch(obs_depth).permute(0, 1, 4, 2, 3), # [B, T, C, H, W]
-            to_torch(obs_sem).permute(0, 1, 4, 2, 3),   # [B, T, C, H, W]
-            to_torch(veccs),
-            to_torch(goals),
-            to_torch(acts),
-            to_torch(rews),
-            to_torch(terms),
-        )
+        return (depth, sem, vec, goal, act, rew, done)
 
 
     def load_from_disk(self, path):
@@ -96,7 +97,7 @@ class SequenceBuffer:
                 vec = data["vector"][i] if "vector" in data else np.zeros(3, dtype=np.float32)
                 goal = data["goal"][i] if "goal" in data else np.zeros(2, dtype=np.float32)
 
-                done = (i == T - 1)   # enforce boundary at end of each sequence file
+                done = bool(data["done"][i]) if "done" in data else (i == T - 1)   # enforce boundary at end of each sequence file
                 self.add(
                     data["depth"][i],
                     data["semantic"][i],
