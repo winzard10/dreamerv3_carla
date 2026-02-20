@@ -7,8 +7,8 @@ from env.carla_wrapper import CarlaEnv
 
 # Configuration
 SAVE_DIR = "./data/expert_sequences"
-TARGET_STEPS = 500 # 50000
-SEQ_LEN = 50         
+TARGET_STEPS = 50000 # 50000
+SEQ_LEN = 10        
 
 def run_collection():
     if not os.path.exists(SAVE_DIR):

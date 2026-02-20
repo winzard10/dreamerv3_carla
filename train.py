@@ -31,7 +31,7 @@ BATCH_SIZE = 16
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 160, 160
 
-PHASE_A_STEPS = 100 # 20000
+PHASE_A_STEPS = 20000 # 20000
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
 # training
@@ -40,14 +40,13 @@ ACTOR_LR = 3e-5
 CRITIC_LR = 3e-5
 
 PHASE_B_STEPS = 2000
-PART_B_EPISODE = 10 # 5000
+PART_B_EPISODE = 5000 # 5000
 TRAIN_EVERY = 5   # Update the model every 5 steps
 IMAG_HORIZON = 15
 GAMMA = 0.99
 LAMBDA = 0.95
 
 # loss scales
-DEPTH_SCALE = 1000.0
 SEM_SCALE = 10.0
 REWARD_SCALE = 1.0
 CONT_SCALE = 1.0
@@ -72,6 +71,10 @@ def ema_update(target: torch.nn.Module, online: torch.nn.Module, tau: float):
     with torch.no_grad():
         for tp, p in zip(target.parameters(), online.parameters()):
             tp.data.mul_(tau).add_(p.data, alpha=(1.0 - tau))
+            
+def gaussian_nll(x, mean, std=0.1, eps=1e-6):
+    var = (std ** 2) + eps
+    return 0.5 * ((x - mean) ** 2) / var + torch.log(torch.tensor(std + eps, device=x.device))
 
 
 def preprocess_batch(depths, sems, vectors, goals, actions, rewards, dones):
@@ -277,9 +280,11 @@ def main():
             cont_logits   = cont_head(deter_flat, stoch_flat, goal_in)                    # [B*T,1]
             cont_target = (1.0 - dones_seq.float()).reshape(-1, 1)             # [B*T,1]
             cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
+            
+            depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
 
             wm_loss = (
-                DEPTH_SCALE * depth_loss
+                depth_nll
                 + SEM_SCALE * sem_loss
                 + KL_SCALE * kl_loss
                 + REWARD_SCALE * reward_loss
@@ -440,8 +445,10 @@ def main():
                 cont_logits = cont_head(deter_flat, stoch_flat, goal_in)             # [B*T, 1]
                 cont_target = (1.0 - dones_seq.float()).reshape(-1, 1)
                 cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
+                
+                depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
 
-                wm_loss = (DEPTH_SCALE * depth_loss + SEM_SCALE * sem_loss + KL_SCALE * kl_loss + 
+                wm_loss = (depth_nll + SEM_SCALE * sem_loss + KL_SCALE * kl_loss + 
                            REWARD_SCALE * reward_loss + CONT_SCALE * cont_loss)
                 wm_loss.backward()
                 torch.nn.utils.clip_grad_norm_(wm_params, max_norm=100.0)
@@ -465,32 +472,76 @@ def main():
 
                     imag = rssm.imagine(start_deter, start_stoch, actor, goal0, horizon=IMAG_HORIZON)
 
+                    # states
+                    imag_deter = imag["deter"][:, :-1]   # s0..s_{H-1}  shape [B,H,D]
+                    imag_stoch = imag["stoch"][:, :-1]   # s0..s_{H-1}
+                    next_deter = imag["deter"][:, 1:]    # s1..s_H
+                    next_stoch = imag["stoch"][:, 1:]
+
                     Bh = B * IMAG_HORIZON
-                    imag_deter_f = imag["deter"].reshape(Bh, -1)
-                    imag_stoch_f = rssm.flatten_stoch(imag["stoch"].reshape(Bh, rssm.C, rssm.K))
+                    imag_deter_f = imag_deter.reshape(Bh, -1)
+                    imag_stoch_f = rssm.flatten_stoch(imag_stoch.reshape(Bh, rssm.C, rssm.K))
 
                     goal_h = goal0.unsqueeze(1).expand(B, IMAG_HORIZON, 2).reshape(Bh, 2)
 
-                    imag_reward = symexp(twohot.mean(reward_head(imag_deter_f, imag_stoch_f, goal_h))).reshape(B, IMAG_HORIZON, 1)
-                    imag_cont_prob = torch.sigmoid(cont_head(imag_deter_f, imag_stoch_f, goal_h)).reshape(B, IMAG_HORIZON, 1)
+                    # rewards/continue should be predicted at s_t (same length H)
+                    imag_reward_symlog = twohot.mean(reward_head(imag_deter_f, imag_stoch_f, goal_h))
+                    imag_reward = symexp(imag_reward_symlog).view(B, IMAG_HORIZON, 1)
+
+                    imag_cont_logits = cont_head(imag_deter_f, imag_stoch_f, goal_h)
+                    imag_cont_prob = torch.sigmoid(imag_cont_logits).view(B, IMAG_HORIZON, 1)
+                    discounts = (GAMMA * imag_cont_prob).clamp(0.0, 1.0)
+
+                    # values should be V(s_t) for t=0..H, so compute on imag["deter"] (H+1)
+                    Bh1 = B * (IMAG_HORIZON + 1)
+                    all_deter_f = imag["deter"].reshape(Bh1, -1)
+                    all_stoch_f = rssm.flatten_stoch(imag["stoch"].reshape(Bh1, rssm.C, rssm.K))
+                    goal_h1 = goal0.unsqueeze(1).expand(B, IMAG_HORIZON + 1, 2).reshape(Bh1, 2)
 
                     with torch.no_grad():
-                        target_val = symexp(twohot.mean(target_critic(imag_deter_f, imag_stoch_f, goal_h))).reshape(B, IMAG_HORIZON, 1)
+                        target_v_symlog = twohot.mean(target_critic(all_deter_f, all_stoch_f, goal_h1))
+                        target_v = symexp(target_v_symlog).view(B, IMAG_HORIZON + 1, 1)
 
-                    val = symexp(twohot.mean(critic(imag_deter_f, imag_stoch_f, goal_h))).reshape(B, IMAG_HORIZON, 1)
-                    
-                    discounts = (GAMMA * imag_cont_prob.detach()).clamp(0.0, 1.0)
+                    v_symlog = twohot.mean(critic(all_deter_f, all_stoch_f, goal_h1))
+                    v = symexp(v_symlog).view(B, IMAG_HORIZON + 1, 1)
 
+                    # lambda return uses V(s_{t+1}) inside recursion, but your function expects value indexed with reward
+                    # easiest: pass value = target_v[:, :-1] (V(s_t)) and bootstrap = target_v[:, -1] (V(s_H))
                     returns = lambda_return(
-                        reward=imag_reward, value=val, discount=discounts,
-                        lam=LAMBDA, bootstrap=target_val[:, -1, :], time_major=False
-                    )
+                        reward=imag_reward,                   # [B,H,1] = r_t
+                        value=target_v[:, :-1],               # [B,H,1] = V(s_t)
+                        discount=discounts,                   # [B,H,1] = gamma_t
+                        lam=LAMBDA,
+                        bootstrap=target_v[:, -1],            # [B,1]   = V(s_H)
+                        time_major=False
+                    )  # [B,H,1]
 
+                    # weight_t = prod_{i < t} discounts_i
+                    # (prepend 1.0 for t=0)
+                    weights = torch.cumprod(
+                        torch.cat([torch.ones(B, 1, 1, device=DEVICE), discounts[:, :-1]], dim=1),
+                        dim=1
+                    )  # [B,H,1]
+                    
+                    # advantage baseline: compare returns vs V(s_t)
+                    adv = returns - v[:, :-1].detach()
+
+                    # V3-ish normalization (strongly recommended)
+                    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+                    # ---------- actor loss: weighted advantage (baseline) + entropy bonus ----------
                     actor_opt.zero_grad(set_to_none=True)
-                    actor_loss = -(returns.mean() - ENT_SCALE * imag["ent"].mean())
+                    actor_loss = -(weights * adv).mean() - ENT_SCALE * (weights * imag["ent"].unsqueeze(-1)).mean()
                     actor_loss.backward()
                     torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=100.0)
                     actor_opt.step()
+                    
+                    assert imag_reward.shape == (B, IMAG_HORIZON, 1)
+                    assert discounts.shape == (B, IMAG_HORIZON, 1)
+                    assert target_v.shape == (B, IMAG_HORIZON + 1, 1)
+                    assert v.shape == (B, IMAG_HORIZON + 1, 1)
+                    assert returns.shape == (B, IMAG_HORIZON, 1)
+                    assert imag["ent"].shape == (B, IMAG_HORIZON)
 
                 finally:
                     for p in critic.parameters():
@@ -500,10 +551,14 @@ def main():
 
                 # Critic update (normal)
                 critic_opt.zero_grad(set_to_none=True)
-                goal_h_det = goal_h.detach()
-                val_logits = critic(imag_deter_f.detach(), imag_stoch_f.detach(), goal_h_det)
-                critic_loss = twohot.ce_loss(val_logits, symlog(returns.detach().reshape(-1)))
+
+                # critic predicts logits in symlog-space distribution bins
+                val_logits = critic(imag_deter_f.detach(), imag_stoch_f.detach(), goal_h.detach())   # [Bh, bins]
+
+                # returns are in RAW space -> convert to symlog target inside ce_loss call
+                critic_loss = twohot.ce_loss(val_logits, symlog(returns.detach().view(-1)))          # [Bh]
                 critic_loss.backward()
+
                 torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=100.0)
                 critic_opt.step()
                 ema_update(target_critic, critic, TARGET_EMA)

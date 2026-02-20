@@ -28,19 +28,19 @@ def lambda_return(
 
     if bootstrap is None:
         bootstrap = value[-1]  # [B,1]
-    # ensure bootstrap shape [B,1]
-    if bootstrap.ndim == 1:
-        bootstrap = bootstrap.unsqueeze(-1)
+    # force [B,1]
+    bootstrap = bootstrap.view(bootstrap.shape[0], 1)
+    
+    assert reward.shape == value.shape == discount.shape
+    assert reward.ndim == 3 and reward.shape[-1] == 1
 
     returns = torch.zeros_like(value)
-    next_return = bootstrap  # G_{H} base
-
-    # Backward recursion
+    value_tp1 = torch.cat([value[1:], bootstrap.unsqueeze(0)], dim=0)  # [H,B,1]
+    next_return = bootstrap
     for t in reversed(range(H)):
-        next_value = value[t + 1] if (t + 1) < H else bootstrap
-        inp = reward[t] + discount[t] * ((1.0 - lam) * next_value + lam * next_return)
-        returns[t] = inp
-        next_return = inp
+        next_value = value_tp1[t]
+        next_return = reward[t] + discount[t] * ((1-lam)*next_value + lam*next_return)
+        returns[t] = next_return
 
     if not time_major:
         returns = returns.transpose(0, 1)

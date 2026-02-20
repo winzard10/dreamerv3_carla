@@ -25,6 +25,7 @@ class Actor(nn.Module):
         super().__init__()
         self.action_dim = action_dim
         self.min_std = min_std
+        self.goal_dim = goal_dim
 
         in_dim = deter_dim + stoch_dim + goal_dim
 
@@ -53,11 +54,12 @@ class Actor(nn.Module):
         log_det = 2.0 * (math.log(2.0) - raw - F.softplus(-2.0 * raw))
         return action, log_det
 
-    def forward(self, deter, stoch_flat, goal=None, sample=True):
-        if goal is None:
-            x = torch.cat([deter, stoch_flat], dim=-1)
-        else:
+    def forward(self, deter, stoch_flat, goal=None, sample=True):    
+        if self.goal_dim > 0:
+            assert goal is not None, "Actor expects goal when goal_dim > 0"
             x = torch.cat([deter, stoch_flat, goal], dim=-1)
+        else:
+            x = torch.cat([deter, stoch_flat], dim=-1)
 
         h = self.trunk(x)
         mean = self.mean_head(h)
@@ -75,7 +77,8 @@ class Actor(nn.Module):
         action = torch.tanh(raw)
         log_det = 2.0 * (math.log(2.0) - raw - F.softplus(-2.0 * raw))
         log_prob = (dist.log_prob(raw) - log_det).sum(dim=-1)
-        entropy = -log_prob
+        base_ent = dist.entropy().sum(dim=-1)
+        entropy = base_ent  # cheap & stable approximation
         mean_action = torch.tanh(mean)
         return action, log_prob, entropy, mean_action
 
@@ -87,8 +90,8 @@ class Critic(nn.Module):
         goal_dim=0,
         hidden_dim=512,
         bins=255,
-        vmin=-20.0,
-        vmax=20.0,
+        vmin=-5.0,
+        vmax=5.0,
         eps=1e-8,
         support_type="uniform",  # "uniform" or "log"
     ):
@@ -141,34 +144,6 @@ class Critic(nn.Module):
 
     def _clamp_target(self, x: torch.Tensor) -> torch.Tensor:
         return torch.clamp(x, self.vmin, self.vmax)
-
-    def two_hot(self, target_symlog: torch.Tensor) -> torch.Tensor:
-        """
-        target_symlog: [...] in symlog-space
-        returns probs: [..., bins]
-        """
-        t = self._clamp_target(target_symlog.to(dtype=self.support.dtype, device=self.support.device))
-
-        idx_high = torch.searchsorted(self.support, t)
-        idx_high = idx_high.clamp(0, self.bins - 1)
-        idx_low = (idx_high - 1).clamp(0, self.bins - 1)
-
-        v_low = self.support[idx_low]
-        v_high = self.support[idx_high]
-        denom = (v_high - v_low).clamp(min=self.eps)
-
-        w_high = ((t - v_low) / denom).clamp(0.0, 1.0)
-        w_low = 1.0 - w_high
-
-        same = (idx_low == idx_high).to(w_low.dtype)
-        w_low = w_low + same * w_high
-        w_high = w_high * (1.0 - same)
-
-        probs = torch.zeros(*t.shape, self.bins, device=t.device, dtype=t.dtype)
-        probs.scatter_add_(-1, idx_low.unsqueeze(-1), w_low.unsqueeze(-1))
-        probs.scatter_add_(-1, idx_high.unsqueeze(-1), w_high.unsqueeze(-1))
-        probs = probs / (probs.sum(dim=-1, keepdim=True) + self.eps)
-        return probs
 
     def log_probs(self, logits: torch.Tensor) -> torch.Tensor:
         return F.log_softmax(logits, dim=-1)
