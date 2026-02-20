@@ -203,38 +203,36 @@ class RSSM(nn.Module):
         deter = self.gru(x, deter_in)
 
         prior_logits_flat = self.prior_net(deter)
-        prior_logits = self._reshape_logits(prior_logits_flat)  # [B,C,K]
-
-        if relaxed:
-            # differentiable sample
-            y = F.gumbel_softmax(prior_logits, tau=temp, hard=True, dim=-1)  # [B,C,K]
-            prior_stoch = y
-        else:
-            prior_stoch = self.straight_through_onehot_from_logits(prior_logits)
-
+        prior_logits = self._reshape_logits(prior_logits_flat)
+        prior_stoch = self.straight_through_onehot_from_logits(prior_logits)
         return deter, prior_stoch, prior_logits_flat
+
     
-    def imagine(self, start_deter: torch.Tensor, start_stoch: torch.Tensor, actor, goal: torch.Tensor, horizon: int):
+    def imagine(self, start_deter, start_stoch, actor, goal, horizon: int):
         deter = start_deter
         stoch = start_stoch
 
-        deters, stochs, ents = [], [], [] # Added ents list
+        deters = [deter]   # include s0
+        stochs = [stoch]
+        ents = []
+        actions = []
 
         for _ in range(horizon):
             stoch_flat = self.flatten_stoch(stoch)
-            
             action, logp, entropy, mean = actor(deter, stoch_flat, goal, sample=True)
 
             deter, stoch, _ = self.img_step(deter, stoch, action)
 
-            deters.append(deter)
+            actions.append(action)
+            ents.append(entropy)
+            deters.append(deter)   # now includes s1..sH
             stochs.append(stoch)
-            ents.append(entropy) # Store it
 
         return {
-            "deter": torch.stack(deters, dim=1),
-            "stoch": torch.stack(stochs, dim=1),
-            "ent": torch.stack(ents, dim=1),     # Return it to train.py
+            "deter": torch.stack(deters, dim=1),  # [B, H+1, D]
+            "stoch": torch.stack(stochs, dim=1),  # [B, H+1, C, K]
+            "action": torch.stack(actions, dim=1),# [B, H, act]
+            "ent": torch.stack(ents, dim=1),      # [B, H]
         }
 
     # ----------------------------
