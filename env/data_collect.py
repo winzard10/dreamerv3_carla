@@ -1,4 +1,5 @@
 import os
+from time import time
 import carla
 import numpy as np
 import torch
@@ -6,7 +7,7 @@ from env.carla_wrapper import CarlaEnv
 
 # Configuration
 SAVE_DIR = "./data/expert_sequences"
-TARGET_STEPS = 50000
+TARGET_STEPS = 500 # 50000
 SEQ_LEN = 50         
 
 def run_collection():
@@ -15,7 +16,7 @@ def run_collection():
 
     # Initialize Environment
     env = CarlaEnv()
-    obs = env.reset()
+    obs, _ = env.reset()
     
     current_seq = {
         "depth": [], "semantic": [], "goal": [], "vector": [],
@@ -48,17 +49,15 @@ def run_collection():
         dot = v_vec.x * w_vec_x + v_vec.y * w_vec_y
         cross = v_vec.x * w_vec_y - v_vec.y * w_vec_x
         
-        angle = np.arccos(np.clip(dot, -1.0, 1.0))
-        if cross < 0: angle = -angle
-        
-        # PID Steering
+        angle = np.arctan2(cross, dot)   # signed, stable
         steer = np.clip(0.85 * angle, -1.0, 1.0)
         
         # Throttle: -0.2 maps to 0.4 (40%) in your new wrapper
         action = np.array([steer, -0.2], dtype=np.float32)
 
         # --- 2. Step Environment ---
-        next_obs, reward, done, _ = env.step(action)
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
         
         # Update Spectator Camera (Optional, but good for watching)
         spectator = env.world.get_spectator()
@@ -72,10 +71,11 @@ def run_collection():
         current_seq["vector"].append(obs["vector"])
         current_seq["action"].append(action)
         current_seq["reward"].append(reward)
+        current_seq["done"].append(done)
 
         # --- 4. Save to Disk ---
         if len(current_seq["action"]) == SEQ_LEN:
-            seq_idx = len(os.listdir(SAVE_DIR))
+            seq_idx = int(time.time() * 1000)
             np.savez_compressed(
                 f"{SAVE_DIR}/seq_{seq_idx}.npz",
                 depth=np.array(current_seq["depth"]),
@@ -83,7 +83,8 @@ def run_collection():
                 goal=np.array(current_seq["goal"]),
                 vector=np.array(current_seq["vector"]),
                 action=np.array(current_seq["action"]),
-                reward=np.array(current_seq["reward"])
+                reward=np.array(current_seq["reward"]),
+                done=np.array(current_seq["done"])
             )
             for key in current_seq: current_seq[key] = []
 
@@ -95,7 +96,7 @@ def run_collection():
 
         if done: 
             print(f"Episode Done at Step {step}. Resetting...")
-            obs = env.reset()
+            obs, _ = env.reset()
             # Clear buffer on reset to avoid mixing episodes in one sequence
             for key in current_seq: current_seq[key] = []
 
