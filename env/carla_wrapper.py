@@ -32,7 +32,8 @@ class CarlaEnv(gym.Env):
         self.sensors = []
         self.last_data = {"depth": None, "semantic": None}
     
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
         self._cleanup()
         time.sleep(1.0)
         self.stuck_ticks = 0
@@ -82,7 +83,7 @@ class CarlaEnv(gym.Env):
             tries += 1
             
         self.collision_hist = []
-        return self._get_obs()
+        return self._get_obs(), {}
 
     def step(self, action):
         throttle_val = float((action[1] + 1) / 2) 
@@ -101,12 +102,14 @@ class CarlaEnv(gym.Env):
 
         obs = self._get_obs()
         reward = self._calculate_reward()
-        done = self._check_done()
+        terminated = self._check_done()
+        truncated = False          # time limit etc.
+        done = terminated or truncated
         
         if done:
             self.collision_hist = []
         
-        return obs, reward, done, {}
+        return obs, float(reward), terminated, truncated, {}
 
     def _check_waypoint_completion(self):
         """
@@ -169,10 +172,24 @@ class CarlaEnv(gym.Env):
         array = np.reshape(array, (image.height, image.width, 4))
         self.last_data["depth"] = array[:, :, 0:1]
 
+    # def _process_sem(self, image):
+    #     array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+    #     array = np.reshape(array, (image.height, image.width, 4))
+    #     self.last_data["semantic"] = array[:, :, 2:3] 
+    
     def _process_sem(self, image):
-        array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-        array = np.reshape(array, (image.height, image.width, 4))
-        self.last_data["semantic"] = array[:, :, 2:3] 
+        # Convert to raw labels (NOT CityScapesPalette)
+        image.convert(carla.ColorConverter.Raw)
+
+        array = np.frombuffer(image.raw_data, dtype=np.uint8)
+        array = np.reshape(array, (image.height, image.width, 4))  # BGRA
+
+        # In Raw mode, the semantic tag is stored per-pixel.
+        # Use the R channel (index 2) as the class id.
+        sem_id = array[:, :, 2:3]  # uint8 IDs
+
+        self.last_data["semantic"] = sem_id
+        print("sem min/max:", sem_id.min(), sem_id.max(), "unique:", len(np.unique(sem_id)))
 
     def _get_obs(self):
         # NOTE: Waypoint index logic moved to _check_waypoint_completion

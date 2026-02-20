@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Load the first sequence file
-file_path = "./data/expert_sequences/seq_0.npz"
+file_path = "./data/expert_sequences/seq_1.npz"
 data = np.load(file_path)
 
 # Extract depth and semantic data
@@ -17,8 +17,13 @@ print(f"Depth - Min Value: {depth_data.min()}")
 print(f"Depth - Mean Value: {depth_data.mean():.4f}")
 
 # Check Semantic
+print(f"Semantic Shape: {semantic_data.shape}")
 print(f"Semantic - Max Value: {semantic_data.max()}") # Should be around 25-28
+print(f"Semantic - Min Value: {semantic_data.min()}")
 print(f"Semantic - Mean Value: {semantic_data.mean():.4f}")
+
+u = np.unique(semantic_data[0])
+print("unique labels:", u[:50], "count:", len(u))
 
 # Visualization
 fig, ax = plt.subplots(1, 2, figsize=(12, 5))

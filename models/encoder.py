@@ -7,15 +7,12 @@ class MultiModalEncoder(nn.Module):
         
         # 1. Vision Branch: Depth + Semantic Segmentation
         self.cnn = nn.Sequential(
-            nn.Conv2d(2, 32, kernel_size=4, stride=2), 
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2), 
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2), 
-            nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=4, stride=2), 
-            nn.ReLU(),
-            nn.Flatten() # Output: 16384
+            nn.Conv2d(2, 32, 4, 2), nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2), nn.ReLU(),
+            nn.Conv2d(64, 128, 4, 2), nn.ReLU(),
+            nn.Conv2d(128, 256, 4, 2), nn.ReLU(),
+            nn.AdaptiveAvgPool2d((4, 4)),   # <— fixed size
+            nn.Flatten(),                  # 256*4*4 = 4096
         )
         
         # 2. State Branch: Processes Speed/Heading (Size 3)
@@ -33,9 +30,9 @@ class MultiModalEncoder(nn.Module):
         # 4. Fusion Layer: Merges Perception + State + Intent
         # Total size = 16384 (Vision) + 64 (State) + 32 (Goal)
         self.fusion = nn.Sequential(
-            nn.Linear(16384 + 64 + 32, latent_dim),
+            nn.Linear(4096 + 64 + 32, latent_dim),
             nn.LayerNorm(latent_dim),
-            nn.ReLU()
+            nn.ReLU(),
         )
 
     def forward(self, depth, semantic, vector, goal):
