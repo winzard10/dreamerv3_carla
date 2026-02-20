@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributions as D
 
 
 def stopgrad(x: torch.Tensor) -> torch.Tensor:
@@ -104,15 +105,13 @@ class RSSM(nn.Module):
         logits: [..., C, K]
         returns: [..., C, K] straight-through onehot sample (grad through probs)
         """
-        # sample hard onehot
-        dist = torch.distributions.Categorical(logits=logits)
+        # soft probs (with unimix)
+        probs = self._unimix_probs(F.softmax(logits, -1))
+        probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        dist = D.Categorical(probs=probs)
         idx = dist.sample()  # [..., C]
         onehot = F.one_hot(idx, self.K).to(logits.dtype)  # [..., C, K]
-
-        # soft probs (with unimix)
-        probs = F.softmax(logits, dim=-1)
-        probs = self._unimix_probs(probs)
-        probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
 
         # straight-through: forward hard, backward soft
         return onehot + probs - probs.detach()
@@ -192,7 +191,7 @@ class RSSM(nn.Module):
 
         return deter, post_stoch, post_logits_flat, prior_logits_flat
 
-    def img_step(self, prev_deter, prev_stoch, action):
+    def img_step(self, prev_deter, prev_stoch, action, temp=0.5, relaxed=True):
         B = prev_deter.shape[0]
         prev_stoch_flat = self.flatten_stoch(prev_stoch).view(B, -1)
         
@@ -204,8 +203,15 @@ class RSSM(nn.Module):
         deter = self.gru(x, deter_in)
 
         prior_logits_flat = self.prior_net(deter)
-        prior_logits = self._reshape_logits(prior_logits_flat)
-        prior_stoch = self.straight_through_onehot_from_logits(prior_logits)
+        prior_logits = self._reshape_logits(prior_logits_flat)  # [B,C,K]
+
+        if relaxed:
+            # differentiable sample
+            y = F.gumbel_softmax(prior_logits, tau=temp, hard=True, dim=-1)  # [B,C,K]
+            prior_stoch = y
+        else:
+            prior_stoch = self.straight_through_onehot_from_logits(prior_logits)
+
         return deter, prior_stoch, prior_logits_flat
     
     def imagine(self, start_deter: torch.Tensor, start_stoch: torch.Tensor, actor, goal: torch.Tensor, horizon: int):
@@ -217,12 +223,7 @@ class RSSM(nn.Module):
         for _ in range(horizon):
             stoch_flat = self.flatten_stoch(stoch)
             
-            # 1. The Actor usually returns (action, log_prob, entropy, mode)
-            # We need that 3rd value: index [2]
-            action_out = actor(deter, stoch_flat, goal)
-            
-            action = action_out[0]
-            entropy = action_out[2] # Extract the entropy tensor
+            action, logp, entropy, mean = actor(deter, stoch_flat, goal, sample=True)
 
             deter, stoch, _ = self.img_step(deter, stoch, action)
 

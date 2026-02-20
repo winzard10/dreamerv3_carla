@@ -86,8 +86,10 @@ class CarlaEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
+        # print(f"[DEBUG Wrapper] NN Raw Action -> Steer: {action[0]:.2f}, Throttle/Brake: {action[1]:.2f}")
         throttle_val = float((action[1] + 1) / 2) 
         brake_val = 0.0
+        # print(f"[DEBUG Wrapper] Translated -> Throttle: {throttle_val:.2f}, Brake: {brake_val:.2f}")
         control = carla.VehicleControl(
             steer=float(action[0]),
             throttle=float(max(0, throttle_val)),
