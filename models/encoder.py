@@ -31,7 +31,7 @@ class MultiModalEncoder(nn.Module):
         # depth:  [B,1,H,W] float in [0,1]
         # sem_ids:[B,1,H,W] long in [0..num_classes-1]
 
-        sem_ids = sem_ids.squeeze(1).long()                 # [B,H,W]
+        sem_ids = sem_ids.squeeze(1).long()          # [B,H,W]
         sem_emb = self.sem_embed(sem_ids)            # [B,H,W,E]
         sem_emb = sem_emb.permute(0, 3, 1, 2)        # [B,E,H,W]
 
