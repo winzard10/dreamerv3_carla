@@ -24,6 +24,7 @@ from env.carla_wrapper import CarlaEnv
 # Config
 # -----------------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# DEVICE = torch.device("cuda")
 
 # data
 SEQ_LEN = 10 # 50
@@ -269,7 +270,8 @@ def main():
             recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
 
             depth_loss = F.mse_loss(recon_depth, depth_in)
-            sem_loss = F.cross_entropy(sem_logits, sem_ids)
+            sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function; 
+            # NOTE: potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int! 
 
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
 
