@@ -3,10 +3,13 @@ import time
 import carla
 import numpy as np
 import torch
-from env.carla_wrapper import CarlaEnv
+# from env.carla_wrapper import CarlaEnv
+from carla_wrapper import CarlaEnv
+
 
 # Configuration
 SAVE_DIR = "./data/expert_sequences"
+# SAVE_DIR = "D:\UM Works\4 - Winter 2026\EECS545\project\code\dreamerv3_carla\data\expert_sequences"
 TARGET_STEPS = 50000 # 50000
 SEQ_LEN = 10        
 
