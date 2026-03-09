@@ -17,3 +17,6 @@ docs/
 checkpoints/
 runs/
 plots/
+
+# Ignore custom batch commands
+*.cmd

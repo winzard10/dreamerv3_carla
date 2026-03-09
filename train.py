@@ -132,6 +132,9 @@ def make_resets_from_dones(dones_seq: torch.Tensor) -> torch.Tensor:
     resets[:, 1:] = dones_seq[:, :-1]
     return resets
 
+
+
+
 def main():
     print("Device:", DEVICE)
 
@@ -270,8 +273,14 @@ def main():
             recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
 
             depth_loss = F.mse_loss(recon_depth, depth_in)
-            sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function; 
-            # NOTE: potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int! 
+
+            # convert sem_ids [B*T,H,W] from ids into onehots
+            sem_ids = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
+            sem_ids = torch.permute(sem_ids, (0,3,1,2))                     # [B*T,C,H,W]
+            # calc sementic recon loss
+            sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
+            # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
+            # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
 
