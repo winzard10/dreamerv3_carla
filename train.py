@@ -32,8 +32,10 @@ BATCH_SIZE = 16
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 160, 160
 
-DETER_DIM = 512
-EMBED_DIM = 1024
+_TUNE = 2   # NOTE: int: scaling factor for latent dimensions; only for testing; set to 1 for original setup
+
+DETER_DIM = 512 *_TUNE*_TUNE
+EMBED_DIM = 1024 *_TUNE*_TUNE
 
 PHASE_A_STEPS = 20000 # 20000
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
@@ -158,10 +160,10 @@ def main():
     rssm = RSSM(
         deter_dim=DETER_DIM,
         act_dim=2,
-        embed_dim=1024,   # must match encoder output
+        embed_dim=EMBED_DIM,   # must match encoder output
         goal_dim=2,
-        stoch_categoricals=32,
-        stoch_classes=32,
+        stoch_categoricals=32 *_TUNE,
+        stoch_classes=32 *_TUNE,
         unimix_ratio=0.01,
         kl_balance=0.8,
         free_nats=0.1,
@@ -251,6 +253,9 @@ def main():
 
             wm_opt.zero_grad(set_to_none=True)
 
+            #####################################################################################
+            # ALMOST SAME AS PHASE B {
+            #####################################################################################
             embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)  # [B*T,E]
             embeds = embeds_flat.view(B, T, -1)
 
@@ -267,8 +272,11 @@ def main():
 
             deter_seq = post["deter"]              # [B,T,D]
             stoch_seq = post["stoch"]              # [B,T,C,K]
+
+            ##### NOT IN PHASE B { #####
             post_logits = post["post_logits"]      # [B,T,C*K]
             prior_logits = post["prior_logits"]    # [B,T,C*K]
+            ##### } NOT IN PHASE B #####
 
             deter_flat = deter_seq.reshape(B * T, -1)
             stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
@@ -288,7 +296,9 @@ def main():
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
 
             reward_logits = reward_head(deter_flat, stoch_flat, goal_in)               # [B*T,BINS]
+            ##### NOT IN PHASE B { #####
             reward_target_symlog = symlog(rewards_seq.reshape(-1))             # [B*T]
+            ##### } NOT IN PHASE B #####
             reward_loss = twohot.ce_loss(reward_logits, reward_target_symlog)
 
             cont_logits   = cont_head(deter_flat, stoch_flat, goal_in)                    # [B*T,1]
@@ -305,12 +315,18 @@ def main():
                 + CONT_SCALE * cont_loss
             )
             wm_loss.backward()
+            ##### NOT IN PHASE B { #####
             torch.nn.utils.clip_grad_norm_(
                 list(encoder.parameters()) + list(rssm.parameters()) + list(decoder.parameters())
                 + list(reward_head.parameters()) + list(cont_head.parameters()),
                 max_norm=100.0
             )
+            ##### } NOT IN PHASE B #####
             wm_opt.step()
+
+            #####################################################################################
+            # } ALMOST SAME AS PHASE B
+            #####################################################################################
 
             global_step += 1
             if global_step % 10 == 0:
@@ -431,6 +447,9 @@ def main():
                 encoder.train(); rssm.train(); decoder.train(); reward_head.train(); cont_head.train()
                 wm_opt.zero_grad(set_to_none=True)
 
+                #####################################################################################
+                # ALMOST SAME AS PHASE A {
+                #####################################################################################
                 embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)
                 embeds = embeds_flat.view(B, T, -1)
                 resets = make_resets_from_dones(dones_seq)
@@ -450,7 +469,15 @@ def main():
 
                 recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
                 depth_loss = F.mse_loss(recon_depth, depth_in)
-                sem_loss = F.cross_entropy(sem_logits, sem_ids)
+
+                # convert sem_ids [B*T,H,W] from ids into onehots
+                sem_ids = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
+                sem_ids = torch.permute(sem_ids, (0,3,1,2))                     # [B*T,C,H,W]
+                # calc sementic recon loss
+                sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
+                # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
+                # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
+
                 kl_loss = rssm.kl_loss(post["post_logits"], post["prior_logits"])
                 
                 reward_logits = reward_head(deter_flat, stoch_flat, goal_in)          # [B*T, BINS]
@@ -465,8 +492,16 @@ def main():
                 wm_loss = (depth_nll + SEM_SCALE * sem_loss + KL_SCALE * kl_loss + 
                            REWARD_SCALE * reward_loss + CONT_SCALE * cont_loss)
                 wm_loss.backward()
+
+                ##### NOT IN PHASE A { #####
                 torch.nn.utils.clip_grad_norm_(wm_params, max_norm=100.0)
+                ##### } NOT IN PHASE A #####
+                
                 wm_opt.step()
+
+                #####################################################################################
+                # } ALMOST SAME AS PHASE A
+                #####################################################################################
 
                 # ----- Actor/Critic Imagination -----
                 actor.train(); critic.train()
