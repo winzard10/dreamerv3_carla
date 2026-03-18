@@ -32,6 +32,9 @@ BATCH_SIZE = 16
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 160, 160
 
+DETER_DIM = 512
+EMBED_DIM = 1024
+
 PHASE_A_STEPS = 20000 # 20000
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
@@ -150,10 +153,10 @@ def main():
     # -----------------------
     # Models
     # -----------------------
-    encoder = MultiModalEncoder(latent_dim=1024, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
+    encoder = MultiModalEncoder(latent_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
 
     rssm = RSSM(
-        deter_dim=512,
+        deter_dim=DETER_DIM,
         act_dim=2,
         embed_dim=1024,   # must match encoder output
         goal_dim=2,
@@ -166,20 +169,20 @@ def main():
 
     Z_DIM = rssm.stoch_dim  # C*K (default 1024)
 
-    decoder = MultiModalDecoder(deter_dim=512, stoch_dim=Z_DIM, num_classes=NUM_CLASSES).to(DEVICE)
+    decoder = MultiModalDecoder(deter_dim=DETER_DIM, stoch_dim=Z_DIM, num_classes=NUM_CLASSES).to(DEVICE)
 
     reward_head = RewardHead(
-        deter_dim=512, stoch_dim=Z_DIM, goal_dim=2,
+        deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2,
         hidden_dim=512, bins=BINS, vmin=VMIN, vmax=VMAX
     ).to(DEVICE)
 
     cont_head = ContinueHead(
-        deter_dim=512, stoch_dim=Z_DIM, goal_dim=2, hidden_dim=512
+        deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2, hidden_dim=512
     ).to(DEVICE)
 
     # ✅ FIXED actor init (no state_dim kwarg)
     actor = Actor(
-        deter_dim=512,
+        deter_dim=DETER_DIM,
         stoch_dim=Z_DIM,
         goal_dim=2,      # keep if you want goal-conditioned behavior
         action_dim=2,
@@ -189,7 +192,7 @@ def main():
     ).to(DEVICE)
 
     critic = Critic(
-        deter_dim=512, stoch_dim=Z_DIM, goal_dim=2,
+        deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2,
         hidden_dim=512, bins=BINS, vmin=VMIN, vmax=VMAX
     ).to(DEVICE)
 
