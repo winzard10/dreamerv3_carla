@@ -1,4 +1,4 @@
-import time
+﻿import time
 import carla
 import numpy as np
 import cv2
@@ -17,6 +17,23 @@ class CarlaEnv(gym.Env):
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0 # NEW: Track impulse reward
         self._DISTANCE_TO_CENTERLINE_THRESHOLD = 3.0 # Meters before we consider it "off-road"
+
+        # Plan D: smooth penalties and sustained termination triggers.
+        self._REWARD_COLLISION = -8.0
+        self._REWARD_STALL = -6.0
+        self._REWARD_OFFROAD = -6.0
+        self._REWARD_IDLE = -0.02
+
+        self._COLLISION_COOLDOWN_STEPS = 5
+        self._OFFROAD_PENALTY_STEPS = 3
+        self._DONE_COLLISION_STEPS = 2
+        self._DONE_OFFROAD_STEPS = 8
+        self._DONE_STALL_STEPS = 110
+
+        self.collision_ticks = 0
+        self.offroad_ticks = 0
+        self.collision_cooldown_ticks = 0
+        self._collision_count_seen = 0
         
         # 2. Define Observation and Action Spaces
         self.observation_space = spaces.Dict({
@@ -38,6 +55,10 @@ class CarlaEnv(gym.Env):
         time.sleep(1.0)
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0
+        self.collision_ticks = 0
+        self.offroad_ticks = 0
+        self.collision_cooldown_ticks = 0
+        self._collision_count_seen = 0
         
         settings = self.world.get_settings()
         settings.synchronous_mode = True
@@ -47,7 +68,14 @@ class CarlaEnv(gym.Env):
         # --- Spawn Vehicle ---
         bp = self.blueprint_library.find('vehicle.tesla.model3')
         self.map = self.world.get_map() 
-        spawn_point = random.choice(self.map.get_spawn_points())
+        spawn_points = self.map.get_spawn_points()
+        if len(spawn_points) == 0:
+            raise RuntimeError("No spawn points available in current CARLA map.")
+        if self.np_random is not None:
+            spawn_idx = int(self.np_random.integers(len(spawn_points)))
+        else:
+            spawn_idx = random.randrange(len(spawn_points))
+        spawn_point = spawn_points[spawn_idx]
         self.vehicle = self.world.spawn_actor(bp, spawn_point)
         
         # --- Generate Route (THE FIX) ---
@@ -101,6 +129,7 @@ class CarlaEnv(gym.Env):
         
         # 1. Check Waypoint Logic FIRST (so reward is ready)
         self._check_waypoint_completion()
+        self._update_status_trackers()
 
         obs = self._get_obs()
         reward = self._calculate_reward()
@@ -110,6 +139,10 @@ class CarlaEnv(gym.Env):
         
         if done:
             self.collision_hist = []
+            self.collision_ticks = 0
+            self.offroad_ticks = 0
+            self.collision_cooldown_ticks = 0
+            self._collision_count_seen = 0
         
         return obs, float(reward), terminated, truncated, {}
 
@@ -134,6 +167,26 @@ class CarlaEnv(gym.Env):
             self.current_waypoint_index += 1
             self.waypoint_reward = 1.0 # The "Cookie" for progress!
             # print(f"Waypoint {self.current_waypoint_index} Reached! (+1.0)")
+
+    def _update_status_trackers(self):
+        # Track new collision events and extend their effect briefly.
+        num_collisions = len(self.collision_hist)
+        if num_collisions > self._collision_count_seen:
+            self.collision_cooldown_ticks = self._COLLISION_COOLDOWN_STEPS
+        self._collision_count_seen = num_collisions
+
+        if self.collision_cooldown_ticks > 0:
+            self.collision_ticks += 1
+            self.collision_cooldown_ticks -= 1
+        else:
+            self.collision_ticks = 0
+
+        v = self.vehicle.get_velocity()
+        speed = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
+        self.stuck_ticks = self.stuck_ticks + 1 if speed < 1.0 else 0
+
+        cte = self._get_dist_to_centerline()
+        self.offroad_ticks = self.offroad_ticks + 1 if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0
 
     def _setup_sensors(self):
         depth_bp = self.blueprint_library.find('sensor.camera.depth')
@@ -252,11 +305,11 @@ class CarlaEnv(gym.Env):
         if diff > 180: diff = 360 - diff
         r_angle = max(0.0, 1.0 - (diff / 30.0)) 
 
-        # Penalties
-        r_collision = -15.0 if len(self.collision_hist) > 0 else 0.0
-        r_stall = -10.0 if self.stuck_ticks >= 100 else 0.0 
-        r_idle = -0.05 if speed_kmh < 1.0 else 0.0
-        r_offroad = -10.0 if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0 
+        # Penalties (smoothed)
+        r_collision = self._REWARD_COLLISION if self.collision_ticks > 0 else 0.0
+        r_stall = self._REWARD_STALL if self.stuck_ticks >= self._DONE_STALL_STEPS else 0.0
+        r_idle = self._REWARD_IDLE if speed_kmh < 1.0 else 0.0
+        r_offroad = self._REWARD_OFFROAD if self.offroad_ticks >= self._OFFROAD_PENALTY_STEPS else 0.0
 
         total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
         return total_reward
@@ -264,16 +317,15 @@ class CarlaEnv(gym.Env):
     def _check_done(self):
         if self.current_waypoint_index >= len(self.route_waypoints) - 10:
             return True
-        if len(self.collision_hist) > 0:
-            return True
-        
-        v = self.vehicle.get_velocity()
-        speed = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
-        self.stuck_ticks = self.stuck_ticks + 1 if speed < 1.0 else 0
 
-        if self.stuck_ticks > 100 or self._get_dist_to_centerline() > self._DISTANCE_TO_CENTERLINE_THRESHOLD:
+        # Plan D: require sustained bad states before terminating.
+        if self.collision_ticks >= self._DONE_COLLISION_STEPS:
             return True
-            
+        if self.stuck_ticks > self._DONE_STALL_STEPS:
+            return True
+        if self.offroad_ticks >= self._DONE_OFFROAD_STEPS:
+            return True
+
         return False
 
     def _cleanup(self):

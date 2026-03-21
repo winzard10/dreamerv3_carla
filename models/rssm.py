@@ -33,7 +33,7 @@ class RSSM(nn.Module):
         stoch_classes: int = 32,       # K
         unimix_ratio: float = 0.01,
         kl_balance: float = 0.8,       # alpha
-        free_nats: float = 1.0,
+        free_nats: float = 0.5,
     ):
         super().__init__()
         self.deter_dim = deter_dim
@@ -46,8 +46,8 @@ class RSSM(nn.Module):
         self.stoch_dim = self.C * self.K
 
         self.unimix_ratio = float(unimix_ratio)
-        self.kl_balance = float(kl_balance)
-        self.free_nats = float(free_nats)
+        self.kl_balance = float(min(max(kl_balance, 0.0), 1.0))
+        self.free_nats = float(max(free_nats, 0.0))
 
         # GRU input: prev stochastic (flattened) + action
         self.gru = nn.GRUCell(self.stoch_dim + self.act_dim, self.deter_dim)
@@ -302,8 +302,9 @@ class RSSM(nn.Module):
         kl_rep = (stopgrad(post_probs) * (stopgrad(post_logp) - prior_logp)).sum(dim=-1).sum(dim=-1)  # [B,T]
         kl_dyn = (post_probs * (post_logp - stopgrad(prior_logp))).sum(dim=-1).sum(dim=-1)            # [B,T]
 
-        kl = self.kl_balance * kl_rep + (1.0 - self.kl_balance) * kl_dyn
+        # free nats per branch before balancing for better stability
+        kl_rep = torch.clamp(kl_rep, min=self.free_nats)
+        kl_dyn = torch.clamp(kl_dyn, min=self.free_nats)
 
-        # free nats (applied per timestep)
-        kl = torch.clamp(kl, min=self.free_nats)
+        kl = self.kl_balance * kl_rep + (1.0 - self.kl_balance) * kl_dyn
         return kl.mean()

@@ -1,6 +1,7 @@
-# train.py
+﻿# train.py
 import os
 import copy
+import random
 import numpy as np
 import torch
 import carla
@@ -24,6 +25,7 @@ from env.carla_wrapper import CarlaEnv
 # Config
 # -----------------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SEED = int(os.getenv("DREAMER_SEED", "42"))
 
 # data
 SEQ_LEN = 10 # 50
@@ -42,7 +44,10 @@ CRITIC_LR = 3e-5
 PHASE_B_STEPS = 2000
 PART_B_EPISODE = 5000 # 5000
 TRAIN_EVERY = 5   # Update the model every 5 steps
-IMAG_HORIZON = 15
+ACTOR_CRITIC_EVERY = 2  # Update actor/critic every N world-model updates
+IMAG_HORIZON_WARMUP = 5
+IMAG_HORIZON_MID = 10
+IMAG_HORIZON_FINAL = 15
 GAMMA = 0.99
 LAMBDA = 0.95
 
@@ -50,21 +55,57 @@ LAMBDA = 0.95
 SEM_SCALE = 10.0
 REWARD_SCALE = 1.0
 CONT_SCALE = 1.0
-KL_SCALE = 1.0
+KL_SCALE = float(os.getenv("DREAMER_KL_SCALE", "1.2"))
+RSSM_FREE_NATS = float(os.getenv("DREAMER_FREE_NATS", "0.5"))
+RSSM_KL_BALANCE = float(os.getenv("DREAMER_KL_BALANCE", "0.8"))
 ENT_SCALE = 1e-3
 
-# twohot support
+# twohot support (symlog space)
+# Plan C: narrow support to improve value/reward resolution.
+# You can override from shell, e.g. DREAMER_VALUE_VMIN=-10 DREAMER_VALUE_VMAX=10.
 BINS = 255
-VMIN = -20.0
-VMAX = 20.0
+VMIN = float(os.getenv("DREAMER_VALUE_VMIN", "-8.0"))
+VMAX = float(os.getenv("DREAMER_VALUE_VMAX", "8.0"))
+if VMAX <= VMIN:
+    raise ValueError(f"Invalid value support: VMIN={VMIN}, VMAX={VMAX}")
 
 # target critic EMA
 TARGET_EMA = 0.99
 
 # checkpoints
-LOAD_PRETRAINED = True
+LOAD_PRETRAINED = False
 CKPT_DIR = "checkpoints/dreamerv3"
 CKPT_PATH = os.path.join(CKPT_DIR, "dreamerv3_latest.pth")
+
+
+def set_global_seed(seed: int):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except TypeError:
+        torch.use_deterministic_algorithms(True)
+
+
+def scheduled_imag_horizon(episode: int) -> int:
+    progress = episode / max(PART_B_EPISODE, 1)
+    if progress < (1.0 / 3.0):
+        return IMAG_HORIZON_WARMUP
+    if progress < (2.0 / 3.0):
+        return IMAG_HORIZON_MID
+    return IMAG_HORIZON_FINAL
 
 
 def ema_update(target: torch.nn.Module, online: torch.nn.Module, tau: float):
@@ -132,7 +173,11 @@ def make_resets_from_dones(dones_seq: torch.Tensor) -> torch.Tensor:
     return resets
 
 def main():
+    set_global_seed(SEED)
     print("Device:", DEVICE)
+    print(f"Seed: {SEED}")
+    print(f"Value support (symlog): bins={BINS}, vmin={VMIN}, vmax={VMAX}")
+    print(f"KL config: KL_SCALE={KL_SCALE}, RSSM_FREE_NATS={RSSM_FREE_NATS}, RSSM_KL_BALANCE={RSSM_KL_BALANCE}")
 
     # -----------------------
     # Buffer (offline training only)
@@ -156,8 +201,8 @@ def main():
         stoch_categoricals=32,
         stoch_classes=32,
         unimix_ratio=0.01,
-        kl_balance=0.8,
-        free_nats=0.1,
+        kl_balance=RSSM_KL_BALANCE,
+        free_nats=RSSM_FREE_NATS,
     ).to(DEVICE)
 
     Z_DIM = rssm.stoch_dim  # C*K (default 1024)
@@ -173,7 +218,7 @@ def main():
         deter_dim=512, stoch_dim=Z_DIM, goal_dim=2, hidden_dim=512
     ).to(DEVICE)
 
-    # ✅ FIXED actor init (no state_dim kwarg)
+    # âœ… FIXED actor init (no state_dim kwarg)
     actor = Actor(
         deter_dim=512,
         stoch_dim=Z_DIM,
@@ -349,8 +394,11 @@ def main():
     start_episode = ckpt.get("episode", 0) if (LOAD_PRETRAINED and os.path.exists(CKPT_PATH)) else 0
     
     for episode in range(start_episode + 1, PART_B_EPISODE + 1):
-        obs, _ = env.reset()
+        episode_seed = SEED + episode
+        obs, _ = env.reset(seed=episode_seed)
         episode_reward = 0
+        last_actor_loss = float("nan")
+        current_imag_horizon = scheduled_imag_horizon(episode)
         
         # Initialize RSSM state for the new episode
         prev_deter, prev_stoch = rssm.initial(1, device=DEVICE)
@@ -454,125 +502,136 @@ def main():
                 torch.nn.utils.clip_grad_norm_(wm_params, max_norm=100.0)
                 wm_opt.step()
 
-                # ----- Actor/Critic Imagination -----
-                actor.train(); critic.train()
+                should_update_actor_critic = ((global_step // TRAIN_EVERY) % ACTOR_CRITIC_EVERY == 0)
+                if should_update_actor_critic:
+                    # ----- Actor/Critic Imagination -----
+                    actor.train(); critic.train()
 
-                start_deter = deter_seq[:, -1].detach()
-                start_stoch = stoch_seq[:, -1].detach()
-                goal0 = goals_seq[:, -1].detach()
+                    start_deter = deter_seq[:, -1].detach()
+                    start_stoch = stoch_seq[:, -1].detach()
+                    goal0 = goals_seq[:, -1].detach()
 
-                # Freeze world model params
-                for p in wm_params:
-                    p.requires_grad_(False)
-
-                try:
-                    # Freeze critic params during actor update
-                    for p in critic.parameters():
+                    # Freeze world model params
+                    for p in wm_params:
                         p.requires_grad_(False)
 
-                    imag = rssm.imagine(start_deter, start_stoch, actor, goal0, horizon=IMAG_HORIZON)
+                    try:
+                        # Freeze critic params during actor update
+                        for p in critic.parameters():
+                            p.requires_grad_(False)
 
-                    # states
-                    imag_deter = imag["deter"][:, :-1]   # s0..s_{H-1}  shape [B,H,D]
-                    imag_stoch = imag["stoch"][:, :-1]   # s0..s_{H-1}
-                    next_deter = imag["deter"][:, 1:]    # s1..s_H
-                    next_stoch = imag["stoch"][:, 1:]
+                        imag = rssm.imagine(
+                            start_deter, start_stoch, actor, goal0, horizon=current_imag_horizon
+                        )
 
-                    Bh = B * IMAG_HORIZON
-                    imag_deter_f = imag_deter.reshape(Bh, -1)
-                    imag_stoch_f = rssm.flatten_stoch(imag_stoch.reshape(Bh, rssm.C, rssm.K))
+                        # states
+                        imag_deter = imag["deter"][:, :-1]   # s0..s_{H-1}  shape [B,H,D]
+                        imag_stoch = imag["stoch"][:, :-1]   # s0..s_{H-1}
 
-                    goal_h = goal0.unsqueeze(1).expand(B, IMAG_HORIZON, 2).reshape(Bh, 2)
+                        Bh = B * current_imag_horizon
+                        imag_deter_f = imag_deter.reshape(Bh, -1)
+                        imag_stoch_f = rssm.flatten_stoch(imag_stoch.reshape(Bh, rssm.C, rssm.K))
 
-                    # rewards/continue should be predicted at s_t (same length H)
-                    imag_reward_symlog = twohot.mean(reward_head(imag_deter_f, imag_stoch_f, goal_h))
-                    imag_reward = symexp(imag_reward_symlog).view(B, IMAG_HORIZON, 1)
+                        goal_h = goal0.unsqueeze(1).expand(B, current_imag_horizon, 2).reshape(Bh, 2)
 
-                    imag_cont_logits = cont_head(imag_deter_f, imag_stoch_f, goal_h)
-                    imag_cont_prob = torch.sigmoid(imag_cont_logits).view(B, IMAG_HORIZON, 1)
-                    discounts = (GAMMA * imag_cont_prob).clamp(0.0, 1.0)
+                        # rewards/continue should be predicted at s_t (same length H)
+                        imag_reward_symlog = twohot.mean(reward_head(imag_deter_f, imag_stoch_f, goal_h))
+                        imag_reward = symexp(imag_reward_symlog).view(B, current_imag_horizon, 1)
 
-                    # values should be V(s_t) for t=0..H, so compute on imag["deter"] (H+1)
-                    Bh1 = B * (IMAG_HORIZON + 1)
-                    all_deter_f = imag["deter"].reshape(Bh1, -1)
-                    all_stoch_f = rssm.flatten_stoch(imag["stoch"].reshape(Bh1, rssm.C, rssm.K))
-                    goal_h1 = goal0.unsqueeze(1).expand(B, IMAG_HORIZON + 1, 2).reshape(Bh1, 2)
+                        imag_cont_logits = cont_head(imag_deter_f, imag_stoch_f, goal_h)
+                        imag_cont_prob = torch.sigmoid(imag_cont_logits).view(B, current_imag_horizon, 1)
+                        discounts = (GAMMA * imag_cont_prob).clamp(0.0, 1.0)
 
-                    with torch.no_grad():
-                        target_v_symlog = twohot.mean(target_critic(all_deter_f, all_stoch_f, goal_h1))
-                        target_v = symexp(target_v_symlog).view(B, IMAG_HORIZON + 1, 1)
+                        # values should be V(s_t) for t=0..H, so compute on imag["deter"] (H+1)
+                        Bh1 = B * (current_imag_horizon + 1)
+                        all_deter_f = imag["deter"].reshape(Bh1, -1)
+                        all_stoch_f = rssm.flatten_stoch(imag["stoch"].reshape(Bh1, rssm.C, rssm.K))
+                        goal_h1 = goal0.unsqueeze(1).expand(B, current_imag_horizon + 1, 2).reshape(Bh1, 2)
 
-                    v_symlog = twohot.mean(critic(all_deter_f, all_stoch_f, goal_h1))
-                    v = symexp(v_symlog).view(B, IMAG_HORIZON + 1, 1)
+                        with torch.no_grad():
+                            target_v_symlog = twohot.mean(target_critic(all_deter_f, all_stoch_f, goal_h1))
+                            target_v = symexp(target_v_symlog).view(B, current_imag_horizon + 1, 1)
 
-                    # lambda return uses V(s_{t+1}) inside recursion, but your function expects value indexed with reward
-                    # easiest: pass value = target_v[:, :-1] (V(s_t)) and bootstrap = target_v[:, -1] (V(s_H))
-                    returns = lambda_return(
-                        reward=imag_reward,                   # [B,H,1] = r_t
-                        value=target_v[:, :-1],               # [B,H,1] = V(s_t)
-                        discount=discounts,                   # [B,H,1] = gamma_t
-                        lam=LAMBDA,
-                        bootstrap=target_v[:, -1],            # [B,1]   = V(s_H)
-                        time_major=False
-                    )  # [B,H,1]
+                        v_symlog = twohot.mean(critic(all_deter_f, all_stoch_f, goal_h1))
+                        v = symexp(v_symlog).view(B, current_imag_horizon + 1, 1)
 
-                    # weight_t = prod_{i < t} discounts_i
-                    # (prepend 1.0 for t=0)
-                    weights = torch.cumprod(
-                        torch.cat([torch.ones(B, 1, 1, device=DEVICE), discounts[:, :-1]], dim=1),
-                        dim=1
-                    )  # [B,H,1]
-                    
-                    # advantage baseline: compare returns vs V(s_t)
-                    adv = returns - v[:, :-1].detach()
+                        # lambda return uses V(s_{t+1}) inside recursion, but your function expects value indexed with reward
+                        # easiest: pass value = target_v[:, :-1] (V(s_t)) and bootstrap = target_v[:, -1] (V(s_H))
+                        returns = lambda_return(
+                            reward=imag_reward,                   # [B,H,1] = r_t
+                            value=target_v[:, :-1],               # [B,H,1] = V(s_t)
+                            discount=discounts,                   # [B,H,1] = gamma_t
+                            lam=LAMBDA,
+                            bootstrap=target_v[:, -1],            # [B,1]   = V(s_H)
+                            time_major=False
+                        )  # [B,H,1]
 
-                    # V3-ish normalization (strongly recommended)
-                    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+                        # weight_t = prod_{i < t} discounts_i
+                        # (prepend 1.0 for t=0)
+                        weights = torch.cumprod(
+                            torch.cat([torch.ones(B, 1, 1, device=DEVICE), discounts[:, :-1]], dim=1),
+                            dim=1
+                        )  # [B,H,1]
+                        
+                        # advantage baseline: compare returns vs V(s_t)
+                        adv = returns - v[:, :-1].detach()
 
-                    # ---------- actor loss: weighted advantage (baseline) + entropy bonus ----------
-                    actor_opt.zero_grad(set_to_none=True)
-                    actor_loss = -(weights * adv).mean() - ENT_SCALE * (weights * imag["ent"].unsqueeze(-1)).mean()
-                    actor_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=100.0)
-                    actor_opt.step()
-                    
-                    assert imag_reward.shape == (B, IMAG_HORIZON, 1)
-                    assert discounts.shape == (B, IMAG_HORIZON, 1)
-                    assert target_v.shape == (B, IMAG_HORIZON + 1, 1)
-                    assert v.shape == (B, IMAG_HORIZON + 1, 1)
-                    assert returns.shape == (B, IMAG_HORIZON, 1)
-                    assert imag["ent"].shape == (B, IMAG_HORIZON)
+                        # V3-ish normalization (strongly recommended)
+                        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-                finally:
-                    for p in critic.parameters():
-                        p.requires_grad_(True)
-                    for p in wm_params:
-                        p.requires_grad_(True)
+                        # ---------- actor loss: weighted advantage (baseline) + entropy bonus ----------
+                        actor_opt.zero_grad(set_to_none=True)
+                        actor_loss = -(weights * adv).mean() - ENT_SCALE * (weights * imag["ent"].unsqueeze(-1)).mean()
+                        actor_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=100.0)
+                        actor_opt.step()
+                        last_actor_loss = actor_loss.item()
+                        
+                        assert imag_reward.shape == (B, current_imag_horizon, 1)
+                        assert discounts.shape == (B, current_imag_horizon, 1)
+                        assert target_v.shape == (B, current_imag_horizon + 1, 1)
+                        assert v.shape == (B, current_imag_horizon + 1, 1)
+                        assert returns.shape == (B, current_imag_horizon, 1)
+                        assert imag["ent"].shape == (B, current_imag_horizon)
 
-                # Critic update (normal)
-                critic_opt.zero_grad(set_to_none=True)
+                    finally:
+                        for p in critic.parameters():
+                            p.requires_grad_(True)
+                        for p in wm_params:
+                            p.requires_grad_(True)
 
-                # critic predicts logits in symlog-space distribution bins
-                val_logits = critic(imag_deter_f.detach(), imag_stoch_f.detach(), goal_h.detach())   # [Bh, bins]
+                    # Critic update (normal)
+                    critic_opt.zero_grad(set_to_none=True)
 
-                # returns are in RAW space -> convert to symlog target inside ce_loss call
-                critic_loss = twohot.ce_loss(val_logits, symlog(returns.detach().view(-1)))          # [Bh]
-                critic_loss.backward()
+                    # critic predicts logits in symlog-space distribution bins
+                    val_logits = critic(imag_deter_f.detach(), imag_stoch_f.detach(), goal_h.detach())   # [Bh, bins]
 
-                torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=100.0)
-                critic_opt.step()
-                ema_update(target_critic, critic, TARGET_EMA)
+                    # returns are in RAW space -> convert to symlog target inside ce_loss call
+                    critic_loss = twohot.ce_loss(val_logits, symlog(returns.detach().view(-1)))          # [Bh]
+                    critic_loss.backward()
 
-                # ----- Logging -----
-                if global_step % 20 == 0:
-                    writer.add_scalar("Train/wm_loss", wm_loss.item(), global_step)
-                    writer.add_scalar("Train/depth_loss", depth_loss.item(), global_step)
-                    writer.add_scalar("Train/sem_loss", sem_loss.item(), global_step)
-                    writer.add_scalar("Train/kl_loss", kl_loss.item(), global_step)
-                    writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
-                    writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
-                    writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
-                    writer.add_histogram("Visuals/Imagined_Rewards", imag_reward, global_step)
+                    torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=100.0)
+                    critic_opt.step()
+                    ema_update(target_critic, critic, TARGET_EMA)
+
+                    # ----- Logging -----
+                    if global_step % 20 == 0:
+                        writer.add_scalar("Train/wm_loss", wm_loss.item(), global_step)
+                        writer.add_scalar("Train/depth_loss", depth_loss.item(), global_step)
+                        writer.add_scalar("Train/sem_loss", sem_loss.item(), global_step)
+                        writer.add_scalar("Train/kl_loss", kl_loss.item(), global_step)
+                        writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
+                        writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
+                        writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
+                        writer.add_scalar("Train/imag_horizon", current_imag_horizon, global_step)
+                        writer.add_histogram("Visuals/Imagined_Rewards", imag_reward, global_step)
+                else:
+                    if global_step % 20 == 0:
+                        writer.add_scalar("Train/wm_loss", wm_loss.item(), global_step)
+                        writer.add_scalar("Train/depth_loss", depth_loss.item(), global_step)
+                        writer.add_scalar("Train/sem_loss", sem_loss.item(), global_step)
+                        writer.add_scalar("Train/kl_loss", kl_loss.item(), global_step)
+                        writer.add_scalar("Train/imag_horizon", current_imag_horizon, global_step)
                 
                 # # ----- DREAM VISUALIZATION WITH REWARD OVERLAY -----
                 # if global_step % 100 == 0:
@@ -656,7 +715,8 @@ def main():
                         vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
                         writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
                 
-                pbar_steps.set_postfix({"rew": f"{episode_reward:.1f}", "act_L": f"{actor_loss.item():.2f}"})
+                act_loss_text = f"{last_actor_loss:.2f}" if np.isfinite(last_actor_loss) else "nan"
+                pbar_steps.set_postfix({"rew": f"{episode_reward:.1f}", "act_L": act_loss_text, "H": current_imag_horizon})
 
             if done: break
         

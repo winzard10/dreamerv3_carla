@@ -16,4 +16,4 @@ data/
 docs/
 checkpoints/
 runs/
-plots/
+plots/.venv/
