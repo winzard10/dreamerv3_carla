@@ -286,10 +286,10 @@ def main():
             depth_loss = F.mse_loss(recon_depth, depth_in)
 
             # convert sem_ids [B*T,H,W] from ids into onehots
-            sem_ids = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
-            sem_ids = torch.permute(sem_ids, (0,3,1,2))                     # [B*T,C,H,W]
+            sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
+            sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
             # calc sementic recon loss
-            sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
+            sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
             # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
             # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
@@ -471,10 +471,10 @@ def main():
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 
                 # convert sem_ids [B*T,H,W] from ids into onehots
-                sem_ids = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
-                sem_ids = torch.permute(sem_ids, (0,3,1,2))                     # [B*T,C,H,W]
+                sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
+                sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
                 # calc sementic recon loss
-                sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
+                sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
                 # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
                 # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
@@ -691,6 +691,9 @@ def main():
                         # Convert Logits to IDs: [1, 28, 160, 160] -> [1, 160, 160]
                         r_sem_ids = torch.argmax(sem_logits[0:1], dim=1) 
                         t_sem_ids = sem_ids[0:1]
+
+                        # print("r_sem_ids shape:", r_sem_ids.shape)
+                        # print("t_sem_ids shape:", t_sem_ids.shape)
                         
                         # Normalize IDs to [0, 1] range for visualization (float)
                         # 27 is the max class index (NUM_CLASSES - 1)
@@ -700,6 +703,11 @@ def main():
                         # Add channel dimension back for add_image: [1, 160, 160]
                         t_sem_vis = t_sem_vis.unsqueeze(0)
                         r_sem_vis = r_sem_vis.unsqueeze(0)
+                        
+                        # print("Unsqueezed!")
+                        # print("r_sem_ids shape:", r_sem_vis.shape)
+                        # print("t_sem_ids shape:", t_sem_vis.shape)
+                        # print("Enter")
                         
                         # Concatenate horizontally (GT | Recon)
                         vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
