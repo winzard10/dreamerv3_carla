@@ -32,7 +32,7 @@ BATCH_SIZE = 16
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 160, 160
 
-_TUNE = 2   # NOTE: int: scaling factor for latent dimensions; only for testing; set to 1 for original setup
+_TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing; set to 1 for original setup
 
 DETER_DIM = 512 *_TUNE*_TUNE
 EMBED_DIM = 1024 *_TUNE*_TUNE
@@ -66,6 +66,10 @@ VMAX = 20.0
 
 # target critic EMA
 TARGET_EMA = 0.99
+
+# UTIL
+CLASS_IDS = list(range(NUM_CLASSES))
+COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
 
 # checkpoints
 LOAD_PRETRAINED = True
@@ -283,15 +287,26 @@ def main():
 
             recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
 
+            # Calc depth loss
             depth_loss = F.mse_loss(recon_depth, depth_in)
 
-            # convert sem_ids [B*T,H,W] from ids into onehots
-            sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
-            sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
-            # calc sementic recon loss
-            sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
-            # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
-            # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
+            # Calc semantic loss
+            # 1. use inverse freq of each class as weights
+            unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+            counts = COUNT_IDS_0
+            counts[unique_ids] = freq_ids
+            w_CEL = 1.0 / (counts + 1)
+            w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+            # 2. weighted CE loss
+            sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
+
+            # # convert sem_ids [B*T,H,W] from ids into onehots
+            # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
+            # sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
+            # # calc sementic recon loss
+            # sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
+            # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
+            # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
 
@@ -470,13 +485,23 @@ def main():
                 recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 
-                # convert sem_ids [B*T,H,W] from ids into onehots
-                sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
-                sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
-                # calc sementic recon loss
-                sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
-                # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
-                # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
+                # Calc semantic loss
+                # 1. use inverse freq of each class as weights
+                unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+                counts = COUNT_IDS_0
+                counts[unique_ids] = freq_ids
+                w_CEL = 1.0 / (counts + 1)
+                w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+                # 2. weighted CE loss
+                sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
+
+                # # convert sem_ids [B*T,H,W] from ids into onehots
+                # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
+                # sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
+                # # calc sementic recon loss
+                # sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
+                # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
+                # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
                 kl_loss = rssm.kl_loss(post["post_logits"], post["prior_logits"])
                 
