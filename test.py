@@ -7,109 +7,119 @@ from models.rssm import RSSM
 from models.actor_critic import Actor
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MODEL_PATH = "./checkpoints/dreamerv3/dreamerv3_ep899.pth"
-
+MODEL_PATH = "./checkpoints/dreamerv3/dreamerv3_latest.pth"
 NUM_CLASSES = 28
+TEST_TOWN = "Town10HD"  # Change this to test on different towns # Town01, Town02, Town10HD
 
-def test(num_episodes=5):
-    env = CarlaEnv()
+def run_evaluation(town_name, num_episodes=5):
+    print(f"\n>>> Starting Evaluation on {town_name} <<<")
+    
+    # Initialize env with specific town
+    env = CarlaEnv(town=town_name) # Ensure your CarlaEnv wrapper supports town selection
     world = env.world
+    carla_map = world.get_map()
     spectator = world.get_spectator()
+    
+    available_maps = env.client.get_available_maps()
+    print("Available Maps:")
+    for map_name in available_maps:
+        print(f" - {map_name}")
 
-    # Ensure sync mode
-    settings = world.get_settings()
-    settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 0.05
-    world.apply_settings(settings)
-
-    # -------- Load models --------
+    # Load Models (Same as your original test.py)
     encoder = MultiModalEncoder(latent_dim=1024, num_classes=NUM_CLASSES).to(DEVICE)
     rssm = RSSM().to(DEVICE)
     actor = Actor(goal_dim=2).to(DEVICE)
-
+    
     checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
     encoder.load_state_dict(checkpoint["encoder"])
     rssm.load_state_dict(checkpoint["rssm"])
     actor.load_state_dict(checkpoint["actor"])
+    
+    encoder.eval(); rssm.eval(); actor.eval()
 
-    encoder.eval()
-    rssm.eval()
-    actor.eval()
-
-    total_velocities = []
+    town_results = {
+        "speeds": [],
+        "center_distances": [],
+        "travel_distances": [],
+        "rewards": []
+    }
 
     for ep in range(num_episodes):
         obs, _ = env.reset()
-
-        # Initialize RSSM state
         deter, stoch = rssm.initial(1, device=DEVICE)
         prev_action = torch.zeros(1, 2, device=DEVICE)
-
-        ep_velocity = []
+        
+        # Metric Trackers
+        ep_rewards = []
+        ep_speeds = []
+        ep_center_dist = []
+        total_dist = 0.0
+        prev_loc = env.vehicle.get_location()
+        
         done = False
-
         while not done:
             with torch.no_grad():
-                # ---- Prepare inputs ----
-                depth = (
-                    torch.as_tensor(obs["depth"])
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                    .float()
-                    .to(DEVICE)
-                    / 255.0
-                )
-
-                # IMPORTANT: semantic is class ID — do NOT divide
-                sem = (
-                    torch.as_tensor(obs["semantic"])
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                    .long()
-                    .to(DEVICE)
-                    .clamp(0, NUM_CLASSES - 1)
-                )
-
+                depth = torch.as_tensor(obs["depth"]).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE) / 255.0
+                sem = torch.as_tensor(obs["semantic"]).permute(2, 0, 1).unsqueeze(0).long().to(DEVICE).clamp(0, NUM_CLASSES - 1)
                 vec = torch.as_tensor(obs["vector"]).unsqueeze(0).float().to(DEVICE)
                 goal = torch.as_tensor(obs["goal"]).unsqueeze(0).float().to(DEVICE)
 
-                # ---- Encode ----
                 embed = encoder(depth, sem, vec, goal)
-
-                # ---- RSSM update from real observation ----
-                deter, stoch, _, _ = rssm.obs_step(
-                    deter, stoch, prev_action, embed, goal
-                )
-
+                deter, stoch, _, _ = rssm.obs_step(deter, stoch, prev_action, embed, goal)
                 stoch_flat = rssm.flatten_stoch(stoch)
-
-                # ---- Actor (deterministic for evaluation) ----
                 action, _, _, _ = actor(deter, stoch_flat, goal, sample=False)
-
                 prev_action = action
 
-            # ---- Step environment ----
-            act_np = action.cpu().numpy()[0]
-            obs, reward, terminated, truncated, _ = env.step(act_np)
+            # Step Env
+            obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy()[0])
             done = terminated or truncated
 
-            # ---- Spectator chase cam ----
+            # --- METRIC CALCULATION ---
+            # 1. Speed (km/h)
+            ep_speeds.append(obs["vector"][0])
+            
+            # 2. Travel Distance
+            curr_loc = env.vehicle.get_location()
+            total_dist += curr_loc.distance(prev_loc)
+            prev_loc = curr_loc
+            
+            # 3. Center Line Distance
+            waypoint = carla_map.get_waypoint(curr_loc)
+            ep_center_dist.append(curr_loc.distance(waypoint.transform.location))
+            
+            # 4. Reward
+            ep_rewards.append(reward)
+
+            # Camera logic...
             v_trans = env.vehicle.get_transform()
-            cam_pos = (
-                v_trans.location
-                - (v_trans.get_forward_vector() * 8.0)
-                + carla.Location(z=4.0)
-            )
-            spectator.set_transform(carla.Transform(cam_pos, v_trans.rotation))
+            spectator.set_transform(carla.Transform(v_trans.location - v_trans.get_forward_vector()*8 + carla.Location(z=4), v_trans.rotation))
 
-            ep_velocity.append(obs["vector"][0])
+        # Store Episode Results
+        town_results["speeds"].append(np.mean(ep_speeds))
+        town_results["center_distances"].append(np.mean(ep_center_dist))
+        town_results["travel_distances"].append(total_dist)
+        town_results["rewards"].append(np.mean(ep_rewards))
+        
+        print(f"  Ep {ep+1} | Dist: {total_dist:.1f}m | Avg Speed: {np.mean(ep_speeds):.1f}km/h | Avg Reward: {np.mean(ep_rewards):.2f}")
 
-        avg_speed = np.mean(ep_velocity)
-        total_velocities.append(avg_speed)
-        print(f"Episode {ep+1} | Avg Speed: {avg_speed:.2f} km/h")
+    return town_results
 
-    print(f"\nFinal Average Velocity: {np.mean(total_velocities):.2f} km/h")
+def test_all_towns(town):
+    # towns = ["Town01", "Town02", "Town10HD"] # Town10 uses HD suffix in some CARLA versions
+    final_report = {}
 
+    final_report[town] = run_evaluation(town)
+
+    print("\n" + "="*40)
+    print("FINAL MULTI-TOWN PERFORMANCE REPORT")
+    print("="*40)
+    for town, metrics in final_report.items():
+        print(f"[{town}]")
+        print(f"  Avg Speed:           {np.mean(metrics['speeds']):.2f} km/h")
+        print(f"  Avg Center Distance: {np.mean(metrics['center_distances']):.2f} m")
+        print(f"  Total Travel Dist:   {np.mean(metrics['travel_distances']):.2f} m")
+        print(f"  Avg Episode Reward:  {np.mean(metrics['rewards']):.2f}")
+        print("-" * 20)
 
 if __name__ == "__main__":
-    test()
+    test_all_towns(TEST_TOWN)
