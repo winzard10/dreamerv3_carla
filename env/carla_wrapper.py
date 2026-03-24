@@ -7,12 +7,23 @@ import gymnasium as gym
 from gymnasium import spaces
 
 class CarlaEnv(gym.Env):
-    def __init__(self, host='127.0.0.1', port=2000):
+    def __init__(self, town=None, host='127.0.0.1', port=2000):
         super(CarlaEnv, self).__init__()
         # 1. Setup Client and World
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
-        self.world = self.client.get_world()
+        # self.world = self.client.get_world()
+        # if town:
+        #     self.client.load_world(town)
+        
+        if town:
+            # Map name in CARLA often looks like "Town01_Opt" or "Town01"
+            current_map = self.client.get_world().get_map().name
+            if town not in current_map:
+                print(f"Loading {town}...")
+                self.client.load_world(town)
+                
+        self.world = self.client.get_world()    
         self.blueprint_library = self.world.get_blueprint_library()
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0 # NEW: Track impulse reward
