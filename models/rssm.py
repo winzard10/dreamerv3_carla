@@ -299,11 +299,11 @@ class RSSM(nn.Module):
         # KL(q||p) per categorical then sum over C
         # Balanced KL:
         #   alpha * KL(stopgrad(q) || p) + (1-alpha) * KL(q || stopgrad(p))
-        kl_rep = (stopgrad(post_probs) * (stopgrad(post_logp) - prior_logp)).sum(dim=-1).sum(dim=-1)  # [B,T]
-        kl_dyn = (post_probs * (post_logp - stopgrad(prior_logp))).sum(dim=-1).sum(dim=-1)            # [B,T]
+        kl_rep = (stopgrad(post_probs) * (stopgrad(post_logp) - prior_logp)).sum(dim=-1)  # [B,T,C]
+        kl_dyn = (post_probs * (post_logp - stopgrad(prior_logp))).sum(dim=-1)            # [B,T,C]
 
-        kl = self.kl_balance * kl_rep + (1.0 - self.kl_balance) * kl_dyn
+        kl = self.kl_balance * kl_rep + (1.0 - self.kl_balance) * kl_dyn  # [B,T,C]
 
-        # free nats (applied per timestep)
-        kl = torch.clamp(kl, min=self.free_nats)
+        # free nats applied per categorical slot, then sum over C
+        kl = torch.clamp(kl, min=self.free_nats).sum(dim=-1)  # [B,T]
         return kl.mean()

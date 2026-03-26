@@ -51,6 +51,7 @@ SEM_SCALE = 10.0
 REWARD_SCALE = 1.0
 CONT_SCALE = 1.0
 KL_SCALE = 1.0
+KL_WARMUP_STEPS = 10_000  # linearly ramp KL from 0 to KL_SCALE over this many steps
 ENT_SCALE = 1e-3
 
 # twohot support
@@ -283,10 +284,11 @@ def main():
             
             depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
 
+            kl_scale = min(1.0, global_step / KL_WARMUP_STEPS) * KL_SCALE
             wm_loss = (
                 depth_nll
                 + SEM_SCALE * sem_loss
-                + KL_SCALE * kl_loss
+                + kl_scale * kl_loss
                 + REWARD_SCALE * reward_loss
                 + CONT_SCALE * cont_loss
             )
@@ -448,7 +450,8 @@ def main():
                 
                 depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
 
-                wm_loss = (depth_nll + SEM_SCALE * sem_loss + KL_SCALE * kl_loss + 
+                kl_scale = min(1.0, global_step / KL_WARMUP_STEPS) * KL_SCALE
+                wm_loss = (depth_nll + SEM_SCALE * sem_loss + kl_scale * kl_loss +
                            REWARD_SCALE * reward_loss + CONT_SCALE * cont_loss)
                 wm_loss.backward()
                 torch.nn.utils.clip_grad_norm_(wm_params, max_norm=100.0)
@@ -569,6 +572,7 @@ def main():
                     writer.add_scalar("Train/depth_loss", depth_loss.item(), global_step)
                     writer.add_scalar("Train/sem_loss", sem_loss.item(), global_step)
                     writer.add_scalar("Train/kl_loss", kl_loss.item(), global_step)
+                    writer.add_scalar("Train/kl_scale", kl_scale, global_step)
                     writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
                     writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
