@@ -15,14 +15,17 @@ class MultiModalDecoder(nn.Module):
             nn.ConvTranspose2d( 64,  32, 4, 2, 1), nn.ELU(),
             nn.ConvTranspose2d( 32,  32, 4, 2, 1), nn.ELU(),
         )
-
+        
+        # Depth head
         self.depth_head = nn.Conv2d(32, 1, 3, padding=1)  # logits -> sigmoid -> depth in [0,1]
         
-        self.segm_head  = nn.Sequential(
-            nn.Conv2d(32, num_classes, 3, padding=1),
-            nn.ELU(),
-            nn.Softmax(dim=1)  # add softmax activation across C dim to scale all entries within [0,1]
-        )
+        # Semantic Segmentation head
+        self.segm_head  = nn.Conv2d(32, num_classes, 3, padding=1)
+        # self.segm_head  = nn.Sequential(
+        #     nn.Conv2d(32, num_classes, 3, padding=1),
+        #     nn.ELU(),
+        #     nn.Softmax(dim=1)  # add softmax activation across C dim to scale all entries within [0,1]
+        # )
 
     def forward(self, deter, stoch, out_hw=(160, 160)):
         B = deter.shape[0]
