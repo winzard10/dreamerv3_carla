@@ -37,7 +37,7 @@ _TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing;
 DETER_DIM = 512 *_TUNE*_TUNE
 EMBED_DIM = 1024 *_TUNE*_TUNE
 
-PHASE_A_STEPS = 40000 # 20000
+PHASE_A_STEPS = 20000 # 20000
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
 # training
@@ -70,6 +70,18 @@ TARGET_EMA = 0.99
 # UTIL
 CLASS_IDS = list(range(NUM_CLASSES))
 COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
+
+# NOTE: indicies definitions are from 0.9.16
+# importatn indicies: 
+# Roads=1, SideWalks=2, Wall=4, Fence=5, Pole=6, 
+# TrafficLight=7, TrafficSign=8, Pedestrian=12, Rider=13, Car=14
+# Truck=15, Bus=16, Motorcycle=18, Bicycle=19, RoadLine=24
+IDX_important = torch.tensor([1,2,4,5,6,7,8,12,13,14,15,16,18,19,24], dtype=torch.long)
+IDX_important = IDX_important[IDX_important < NUM_CLASSES]
+print(IDX_important)
+W_CEL = torch.ones(NUM_CLASSES, device=DEVICE)
+W_CEL[IDX_important] = 10000
+W_CEL = W_CEL / torch.sum(W_CEL)
 
 # checkpoints
 LOAD_PRETRAINED = True
@@ -291,12 +303,17 @@ def main():
             depth_loss = F.mse_loss(recon_depth, depth_in)
 
             # Calc semantic loss
-            # 1. use inverse freq of each class as weights
+            
+            # 1a. use inverse freq of each class as weights
             unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
             counts = COUNT_IDS_0
             counts[unique_ids] = freq_ids
             w_CEL = 1.0 / (counts + 1)
             w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+
+            # # 1b. use hardcoded weights to mark important classes
+            # w_CEL = W_CEL
+
             # 2. weighted CE loss
             sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
 
@@ -486,12 +503,16 @@ def main():
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 
                 # Calc semantic loss
-                # 1. use inverse freq of each class as weights
+                # 1a. use inverse freq of each class as weights
                 unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
                 counts = COUNT_IDS_0
                 counts[unique_ids] = freq_ids
                 w_CEL = 1.0 / (counts + 1)
                 w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+                
+                # # 1b. use hardcoded weights to mark important classes
+                # w_CEL = W_CEL
+                
                 # 2. weighted CE loss
                 sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
 
