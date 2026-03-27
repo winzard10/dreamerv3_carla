@@ -16,8 +16,8 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $(hostname)"
 echo "Start: $(date)"
 
-REPO_DIR="/scratch/eecs545w26_class_root/eecs545w26_class/your_uniqname/dreamerv3_carla"
-CARLA_DIR="/scratch/eecs545w26_class_root/eecs545w26_class/your_uniqname/CARLA_0.9.15"  
+REPO_DIR="/scratch/eecs545w26_class_root/eecs545w26_class/jtyzhang/dreamerv3_carla"
+CARLA_DIR="/scratch/eecs545w26_class_root/eecs545w26_class/jtyzhang/CARLA_0.9.15"  
 PORT=2000
 
 cd "$REPO_DIR"
