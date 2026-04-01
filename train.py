@@ -7,6 +7,7 @@ import carla
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from torchmetrics.functional.segmentation import dice_score
 
 from utils.buffer import SequenceBuffer
 from utils.lambda_returns import lambda_return
@@ -37,7 +38,7 @@ _TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing;
 DETER_DIM = 512 *_TUNE*_TUNE
 EMBED_DIM = 1024 *_TUNE*_TUNE
 
-PHASE_A_STEPS = 20000 # 20000
+PHASE_A_STEPS = 40000 # 20000
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
 # training
@@ -71,17 +72,19 @@ TARGET_EMA = 0.99
 CLASS_IDS = list(range(NUM_CLASSES))
 COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
 
-# NOTE: indicies definitions are from 0.9.16
-# importatn indicies: 
-# Roads=1, SideWalks=2, Wall=4, Fence=5, Pole=6, 
-# TrafficLight=7, TrafficSign=8, Pedestrian=12, Rider=13, Car=14
-# Truck=15, Bus=16, Motorcycle=18, Bicycle=19, RoadLine=24
+# HARDCODED WEIGHS
 IDX_important = torch.tensor([1,2,4,5,6,7,8,12,13,14,15,16,18,19,24], dtype=torch.long)
 IDX_important = IDX_important[IDX_important < NUM_CLASSES]
 print(IDX_important)
 W_CEL = torch.ones(NUM_CLASSES, device=DEVICE)
 W_CEL[IDX_important] = 10000
 W_CEL = W_CEL / torch.sum(W_CEL)
+# NOTE: indicies definitions are from 0.9.16
+# importatn indicies: 
+# Roads=1, SideWalks=2, Wall=4, Fence=5, Pole=6, 
+# TrafficLight=7, TrafficSign=8, Pedestrian=12, Rider=13, Car=14
+# Truck=15, Bus=16, Motorcycle=18, Bicycle=19, RoadLine=24
+
 
 # checkpoints
 LOAD_PRETRAINED = True
@@ -221,6 +224,9 @@ def main():
     # TwoHot helper (shared)
     twohot = TwoHotDist(num_bins=BINS, vmin=VMIN, vmax=VMAX, device=DEVICE).to(DEVICE)
 
+    # # Dice Score calculator
+    # dice_sc_calc = DiceScore(num_classes=NUM_CLASSES, input_format='index').to(DEVICE)
+
     # -----------------------
     # Optims
     # -----------------------
@@ -303,7 +309,7 @@ def main():
             depth_loss = F.mse_loss(recon_depth, depth_in)
 
             # Calc semantic loss
-            
+            # I. Weighted CE Loss
             # 1a. use inverse freq of each class as weights
             unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
             counts = COUNT_IDS_0
@@ -325,6 +331,17 @@ def main():
             # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
             # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
+            # II. Dice Loss
+            probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
+            # # change sem_ids to one-hot
+            # sem_ids_one_hot = torch.movedim(F.one_hot(sem_ids, num_classes=NUM_CLASSES).float(), 3, 1)   # [B*T,C,H,W]
+            # calc dice score
+            # dice_sc = dice_sc_calc(probs, sem_ids_one_hot)
+            dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
+            # add dice LOSS to sem_loss
+            sem_loss += 1 - dice_sc
+
+            # Calc KL-loss
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
 
             reward_logits = reward_head(deter_flat, stoch_flat, goal_in)               # [B*T,BINS]
@@ -503,16 +520,17 @@ def main():
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 
                 # Calc semantic loss
+                # I. Weighted CE Loss
                 # 1a. use inverse freq of each class as weights
                 unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
                 counts = COUNT_IDS_0
                 counts[unique_ids] = freq_ids
                 w_CEL = 1.0 / (counts + 1)
                 w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
-                
+
                 # # 1b. use hardcoded weights to mark important classes
                 # w_CEL = W_CEL
-                
+
                 # 2. weighted CE loss
                 sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
 
@@ -524,6 +542,13 @@ def main():
                 # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
                 # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
+                # II. Dice Loss
+                probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
+                dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
+                # add dice LOSS to sem_loss
+                sem_loss += 1.0 - dice_sc
+
+                # Calc KL-loss
                 kl_loss = rssm.kl_loss(post["post_logits"], post["prior_logits"])
                 
                 reward_logits = reward_head(deter_flat, stoch_flat, goal_in)          # [B*T, BINS]

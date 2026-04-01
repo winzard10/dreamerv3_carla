@@ -20,7 +20,7 @@ class MultiModalDecoder(nn.Module):
         self.depth_head = nn.Conv2d(32, 1, 3, padding=1)  # logits -> sigmoid -> depth in [0,1]
         
         # Semantic Segmentation head
-        self.segm_head  = nn.Conv2d(32, num_classes, 3, padding=1)
+        self.segm_head = nn.Conv2d(32, num_classes, 3, padding=1)
         # self.segm_head  = nn.Sequential(
         #     nn.Conv2d(32, num_classes, 3, padding=1),
         #     nn.ELU(),
@@ -41,3 +41,4 @@ class MultiModalDecoder(nn.Module):
         
         depth = torch.sigmoid(depth_mean)
         return depth, segm_logits
+    
