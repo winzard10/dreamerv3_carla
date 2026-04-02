@@ -28,7 +28,8 @@ class CarlaEnv(gym.Env):
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0 # NEW: Track impulse reward
         self._DISTANCE_TO_CENTERLINE_THRESHOLD = 3.0 # Meters before we consider it "off-road"
-        
+        self.prev_action = None
+
         # 2. Define Observation and Action Spaces
         self.observation_space = spaces.Dict({
             "depth": spaces.Box(low=0, high=255, shape=(160, 160, 1), dtype=np.uint8),
@@ -49,7 +50,8 @@ class CarlaEnv(gym.Env):
         time.sleep(1.0)
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0
-        
+        self.prev_action = None
+
         settings = self.world.get_settings()
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = 0.05
@@ -114,7 +116,7 @@ class CarlaEnv(gym.Env):
         self._check_waypoint_completion()
 
         obs = self._get_obs()
-        reward = self._calculate_reward()
+        reward = self._calculate_reward(action)
         terminated = self._check_done()
         truncated = False          # time limit etc.
         done = terminated or truncated
@@ -242,7 +244,7 @@ class CarlaEnv(gym.Env):
         
         return cross_prod / norm_AB
         
-    def _calculate_reward(self):
+    def _calculate_reward(self, action):
         v = self.vehicle.get_velocity()
         speed_kmh = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
         
@@ -269,7 +271,28 @@ class CarlaEnv(gym.Env):
         r_idle = -0.05 if speed_kmh < 1.0 else 0.0
         r_offroad = -10.0 if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0 
 
-        total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
+        # Action inconsistency penalty
+        r_smooth = 0.0
+        if self.prev_action is not None:
+            da= np.array(action, dtype=np.float32) - self.prev_action
+            # weighted squared difference
+            r_smooth = -(
+                0.08 * (da[0] ** 2) + # steer change penalty (can be tuned)
+                0.03 * (da[1] ** 2)   # throttle/break change penalty (can be tuned)
+            )
+
+        self.prev_action = np.array(action, dtype=np.float32)
+
+        # Calculate total reward
+        total_reward = (
+            (r_speed * r_center * r_angle)
+            + r_collision + r_stall + r_offroad + r_idle
+            + self.waypoint_reward
+            + r_smooth
+        )
+
+        # total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
+
         return total_reward
 
     def _check_done(self):
