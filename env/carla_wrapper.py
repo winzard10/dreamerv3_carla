@@ -75,6 +75,13 @@ class CarlaEnv(gym.Env):
                 self.route_waypoints.append(next_ws[0])
             else:
                 break
+        
+        # Visualize the route with persistent lines (for debugging)
+        for i in range(len(self.route_waypoints) - 1):
+            start = self.route_waypoints[i].transform.location + carla.Location(z=0.1)
+            end = self.route_waypoints[i+1].transform.location + carla.Location(z=0.1)
+            # Draw a persistent green line connecting the waypoints
+            self.world.debug.draw_line(start, end, thickness=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
 
         self.current_waypoint_index = 1 
 
@@ -136,6 +143,15 @@ class CarlaEnv(gym.Env):
         # Get current target location
         target_loc = self.route_waypoints[self.current_waypoint_index].transform.location
         vehicle_loc = self.vehicle.get_location()
+        
+        # Draw a red "X" at the target waypoint for debugging
+        self.world.debug.draw_string(
+            target_loc + carla.Location(z=1.0), 
+            "X", 
+            draw_shadow=False,
+            color=carla.Color(255, 0, 0), 
+            life_time=0.1
+        )
         
         # Distance check
         dist = vehicle_loc.distance(target_loc)
