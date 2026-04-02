@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=dreamerv3_train
+#SBATCH --job-name=dreamerv3_collect-train
 #SBATCH --account=eecs545w26_class
 #SBATCH --partition=spgpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=180G
-#SBATCH --time=03:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
@@ -88,10 +88,10 @@ fi
 
 cd "$REPO_DIR"
 
-##echo "=== Stage 1: Data collection ==="
-##python -m env.data_collect > "$REPO_DIR/logs/collect-${SLURM_JOB_ID}.log" 2>&1
+echo "=== Stage 1: Data collection ==="
+python -m env.data_collect > "$REPO_DIR/logs/collect-${SLURM_JOB_ID}.log" 2>&1
 
-echo "=== Training ==="
+echo "=== Stage 2: Training ==="
 python -m train > "$REPO_DIR/logs/train-${SLURM_JOB_ID}.log" 2>&1
 
 echo "Finished: $(date)"
