@@ -3,7 +3,8 @@ import torch.nn as nn
 
 class MultiModalEncoder(nn.Module):
 
-    K:int = 4   # Conv kernel size (default: 4)
+    K:int = 4       # Conv kernel size (default: 4)
+    d_final = 5     # final output size of encoder (default: 4)
 
     def __init__(self, latent_dim=1024, num_classes=28, sem_embed_dim=16):
         super().__init__()
@@ -12,22 +13,37 @@ class MultiModalEncoder(nn.Module):
 
         # CNN now gets: depth(1) + sem_emb(E) channels
         K = self.K
+        D = self.d_final
         in_ch = 1 + sem_embed_dim
+
         self.cnn = nn.Sequential(
-            nn.Conv2d(in_ch, 32, K, 2), nn.ReLU(),
-            nn.Conv2d(32, 64, K, 2), nn.ReLU(),
-            nn.Conv2d(64, 128, K, 2), nn.ReLU(),
-            nn.Conv2d(128, 256, K, 2), nn.ReLU(),
-            # nn.AdaptiveAvgPool2d((4, 4)),
-            nn.AdaptiveMaxPool2d((4, 4)),
-            nn.Flatten(),  # 256*4*4=4096
+            # # Initial Implementation
+            # nn.Conv2d(in_ch, 32, K, 2), nn.ReLU(),  # H=W=160 -> 80
+            # nn.Conv2d(32, 64, K, 2), nn.ReLU(),     # H=W=80 -> 40
+            # nn.Conv2d(64, 128, K, 2), nn.ReLU(),    # H=W=40 -> 20
+            # nn.Conv2d(128, 256, K, 2), nn.ReLU(),   # H=W=20 -> 10
+            # # nn.AdaptiveAvgPool2d((4, 4)),
+            # nn.AdaptiveMaxPool2d((D, D)),
+            # nn.Flatten(),  # 256 *D*D 
+
+            # Deeper Implementation
+            nn.Conv2d(in_ch, in_ch, K, 1), nn.ReLU(),
+            nn.Conv2d(in_ch, 32, K, 2), nn.ReLU(),  # H=W=160 -> 80
+            nn.Conv2d(32, 32, K, 1), nn.ReLU(),
+            nn.Conv2d(32, 64, K, 2), nn.ReLU(),     # H=W=80 -> 40
+            nn.Conv2d(64, 64, K, 1), nn.ReLU(),
+            nn.Conv2d(64, 128, K, 2), nn.ReLU(),    # H=W=40 -> 20
+            nn.Conv2d(128, 128, K, 1), nn.ReLU(),
+            nn.Conv2d(128, 256, K, 2), nn.ReLU(),   # H=W=20 -> 10
+            nn.AdaptiveMaxPool2d((D, D)),
+            nn.Flatten(),  # 256 *D*D 
         )
 
         self.vector_fc = nn.Sequential(nn.Linear(3, 64), nn.ReLU())
         self.goal_fc   = nn.Sequential(nn.Linear(2, 32), nn.ReLU())
 
         self.fusion = nn.Sequential(
-            nn.Linear(4096 + 64 + 32, latent_dim),
+            nn.Linear(256*(D**2) + 64 + 32, latent_dim),
             nn.LayerNorm(latent_dim),
             nn.ReLU(),
         )
