@@ -38,7 +38,7 @@ _TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing;
 DETER_DIM = 512 *_TUNE*_TUNE
 EMBED_DIM = 1024 *_TUNE*_TUNE
 
-PHASE_A_STEPS = 80000 # 20k, 40k
+PHASE_A_STEPS = 40000 # 20k, 40k
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
 # training
