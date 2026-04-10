@@ -2,19 +2,24 @@ import torch
 import torch.nn as nn
 
 class MultiModalEncoder(nn.Module):
+
+    K:int = 4   # Conv kernel size (default: 4)
+
     def __init__(self, latent_dim=1024, num_classes=28, sem_embed_dim=16):
         super().__init__()
 
         self.sem_embed = nn.Embedding(num_classes, sem_embed_dim)
 
         # CNN now gets: depth(1) + sem_emb(E) channels
+        K = self.K
         in_ch = 1 + sem_embed_dim
         self.cnn = nn.Sequential(
-            nn.Conv2d(in_ch, 32, 4, 2), nn.ReLU(),
-            nn.Conv2d(32, 64, 4, 2), nn.ReLU(),
-            nn.Conv2d(64, 128, 4, 2), nn.ReLU(),
-            nn.Conv2d(128, 256, 4, 2), nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 4)),
+            nn.Conv2d(in_ch, 32, K, 2), nn.ReLU(),
+            nn.Conv2d(32, 64, K, 2), nn.ReLU(),
+            nn.Conv2d(64, 128, K, 2), nn.ReLU(),
+            nn.Conv2d(128, 256, K, 2), nn.ReLU(),
+            # nn.AdaptiveAvgPool2d((4, 4)),
+            nn.AdaptiveMaxPool2d((4, 4)),
             nn.Flatten(),  # 256*4*4=4096
         )
 

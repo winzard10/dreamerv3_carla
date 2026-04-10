@@ -331,15 +331,11 @@ def main():
             # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
             # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
-            # II. Dice Loss
-            probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
-            # # change sem_ids to one-hot
-            # sem_ids_one_hot = torch.movedim(F.one_hot(sem_ids, num_classes=NUM_CLASSES).float(), 3, 1)   # [B*T,C,H,W]
-            # calc dice score
-            # dice_sc = dice_sc_calc(probs, sem_ids_one_hot)
-            dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
-            # add dice LOSS to sem_loss
-            sem_loss += 1 - dice_sc
+            # # II. Dice Loss
+            # probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
+            # dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
+            # # add dice LOSS to sem_loss
+            # sem_loss += 1 - dice_sc
 
             # Calc KL-loss
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
@@ -542,11 +538,11 @@ def main():
                 # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
                 # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
 
-                # II. Dice Loss
-                probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
-                dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
-                # add dice LOSS to sem_loss
-                sem_loss += 1.0 - dice_sc
+                # # II. Dice Loss
+                # probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
+                # dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
+                # # add dice LOSS to sem_loss
+                # sem_loss += 1.0 - dice_sc
 
                 # Calc KL-loss
                 kl_loss = rssm.kl_loss(post["post_logits"], post["prior_logits"])
