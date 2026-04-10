@@ -3,17 +3,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MultiModalDecoder(nn.Module):
+    
+    K:int = 4   # Conv kernel size (default: 4)
+    
     def __init__(self, deter_dim=512, stoch_dim=1024, num_classes=28):
         super().__init__()
         in_dim = deter_dim + stoch_dim
 
         self.fc = nn.Linear(in_dim, 256 * 8 * 8)
 
+        K = self.K
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.ELU(),
-            nn.ConvTranspose2d(128,  64, 4, 2, 1), nn.ELU(),
-            nn.ConvTranspose2d( 64,  32, 4, 2, 1), nn.ELU(),
-            nn.ConvTranspose2d( 32,  32, 4, 2, 1), nn.ELU(),
+            nn.ConvTranspose2d(256, 128, K, 2, 1), nn.ELU(),
+            nn.ConvTranspose2d(128,  64, K, 2, 1), nn.ELU(),
+            nn.ConvTranspose2d( 64,  32, K, 2, 1), nn.ELU(),
+            nn.ConvTranspose2d( 32,  32, K, 2, 1), nn.ELU(),
         )
         
         # Depth head
