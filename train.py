@@ -38,7 +38,7 @@ _TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing;
 DETER_DIM = 512 *_TUNE*_TUNE
 EMBED_DIM = 1024 *_TUNE*_TUNE
 
-PHASE_A_STEPS = 40000 # 20000
+PHASE_A_STEPS = 80000 # 20k, 40k
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
 # training
@@ -75,7 +75,6 @@ COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
 # HARDCODED WEIGHS
 IDX_important = torch.tensor([1,2,4,5,6,7,8,12,13,14,15,16,18,19,24], dtype=torch.long)
 IDX_important = IDX_important[IDX_important < NUM_CLASSES]
-print(IDX_important)
 W_CEL = torch.ones(NUM_CLASSES, device=DEVICE)
 W_CEL[IDX_important] = 10000
 W_CEL = W_CEL / torch.sum(W_CEL)
