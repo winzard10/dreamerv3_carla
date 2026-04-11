@@ -17,26 +17,26 @@ class MultiModalEncoder(nn.Module):
         in_ch = 1 + sem_embed_dim
 
         self.cnn = nn.Sequential(
-            # Initial Implementation
-            nn.Conv2d(in_ch, 32, K, 2), nn.ReLU(),  # H=W=160 -> 80
-            nn.Conv2d(32, 64, K, 2), nn.ReLU(),     # H=W=80 -> 40
-            nn.Conv2d(64, 128, K, 2), nn.ReLU(),    # H=W=40 -> 20
-            nn.Conv2d(128, 256, K, 2), nn.ReLU(),   # H=W=20 -> 10
-            # nn.AdaptiveAvgPool2d((4, 4)),
-            nn.AdaptiveMaxPool2d((D, D)),
-            nn.Flatten(),  # 256 *D*D 
-
-            # # Deeper Implementation
-            # nn.Conv2d(in_ch, in_ch, K, 1), nn.ReLU(),
+            # # Initial Implementation
             # nn.Conv2d(in_ch, 32, K, 2), nn.ReLU(),  # H=W=160 -> 80
-            # nn.Conv2d(32, 32, K, 1), nn.ReLU(),
             # nn.Conv2d(32, 64, K, 2), nn.ReLU(),     # H=W=80 -> 40
-            # nn.Conv2d(64, 64, K, 1), nn.ReLU(),
             # nn.Conv2d(64, 128, K, 2), nn.ReLU(),    # H=W=40 -> 20
-            # nn.Conv2d(128, 128, K, 1), nn.ReLU(),
             # nn.Conv2d(128, 256, K, 2), nn.ReLU(),   # H=W=20 -> 10
+            # # nn.AdaptiveAvgPool2d((4, 4)),
             # nn.AdaptiveMaxPool2d((D, D)),
             # nn.Flatten(),  # 256 *D*D 
+
+            # Deeper Implementation
+            nn.Conv2d(in_ch, in_ch, K, 1), nn.ReLU(),
+            nn.Conv2d(in_ch, 32, K, 2), nn.ReLU(),  # H=W=160 -> 80
+            nn.Conv2d(32, 32, K, 1), nn.ReLU(),
+            nn.Conv2d(32, 64, K, 2), nn.ReLU(),     # H=W=80 -> 40
+            nn.Conv2d(64, 64, K, 1), nn.ReLU(),
+            nn.Conv2d(64, 128, K, 2), nn.ReLU(),    # H=W=40 -> 20
+            nn.Conv2d(128, 128, K, 1), nn.ReLU(),
+            nn.Conv2d(128, 256, K, 2), nn.ReLU(),   # H=W=20 -> 10
+            nn.AdaptiveMaxPool2d((D, D)),
+            nn.Flatten(),  # 256 *D*D 
         )
 
         self.vector_fc = nn.Sequential(nn.Linear(3, 64), nn.ReLU())
