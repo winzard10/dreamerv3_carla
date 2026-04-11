@@ -4,7 +4,7 @@ import torch.nn as nn
 class MultiModalEncoder(nn.Module):
     d_final = 4
 
-    def __init__(self, latent_dim=1024, num_classes=28, sem_embed_dim=16):
+    def __init__(self, embed_dim=1024, num_classes=28, sem_embed_dim=16):
         super().__init__()
 
         D = self.d_final
@@ -43,8 +43,8 @@ class MultiModalEncoder(nn.Module):
         )
 
         self.fusion = nn.Sequential(
-            nn.Linear(256 * (D ** 2) + 64 + 32, latent_dim),
-            nn.LayerNorm(latent_dim),
+            nn.Linear(256 * (D ** 2) + 64 + 32, embed_dim),
+            nn.LayerNorm(embed_dim),
             nn.ReLU(),
         )
 

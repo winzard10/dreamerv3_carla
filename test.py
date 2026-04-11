@@ -43,7 +43,7 @@ def colorize_segmentation(seg_ids: np.ndarray, num_classes: int = 28) -> np.ndar
 
 def build_models():
     encoder = MultiModalEncoder(
-        latent_dim=EMBED_DIM,
+        embed_dim=EMBED_DIM,
         num_classes=NUM_CLASSES,
         sem_embed_dim=16,
     ).to(DEVICE)

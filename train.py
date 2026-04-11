@@ -173,7 +173,7 @@ def main():
     # -----------------------
     # Models
     # -----------------------
-    encoder = MultiModalEncoder(latent_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
+    encoder = MultiModalEncoder(embed_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
 
     rssm = RSSM(
         deter_dim=DETER_DIM,
@@ -284,7 +284,7 @@ def main():
             embeds = embeds_flat.view(B, T, -1)
 
             resets = make_resets_from_dones(dones_seq)
-            # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1}, o_t)) ---
+            # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1})) ---
             prev_actions_seq = torch.zeros_like(actions_seq)
             prev_actions_seq[:, 1:] = actions_seq[:, :-1]
             
