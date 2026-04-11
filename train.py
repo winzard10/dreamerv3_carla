@@ -675,8 +675,8 @@ def main():
                         
                         # Normalize IDs to [0, 1] range for visualization (float)
                         # 27 is the max class index (NUM_CLASSES - 1)
-                        t_sem_vis = t_sem_ids.float() / 27.0
-                        r_sem_vis = r_sem_ids.float() / 27.0
+                        t_sem_vis = t_sem_ids.float() / (NUM_CLASSES - 1).float()
+                        r_sem_vis = r_sem_ids.float() / (NUM_CLASSES - 1).float()
                         
                         # Add channel dimension back for add_image: [1, 128, 128]
                         t_sem_vis = t_sem_vis.unsqueeze(0)
