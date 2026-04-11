@@ -7,6 +7,7 @@ import carla
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+# from torchmetrics.functional.segmentation import dice_score
 
 from utils.buffer import SequenceBuffer
 from utils.lambda_returns import lambda_return
@@ -24,14 +25,20 @@ from env.carla_wrapper import CarlaEnv
 # Config
 # -----------------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# DEVICE = torch.device("cuda")
 
 # data
-SEQ_LEN = 50
+SEQ_LEN = 10 # 50
 BATCH_SIZE = 16
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 128, 128
 
-PHASE_A_STEPS = 20000 # 20000
+_TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing; set to 1 for original setup
+
+DETER_DIM = 512 *_TUNE*_TUNE
+EMBED_DIM = 1024 *_TUNE*_TUNE
+
+PHASE_A_STEPS = 20000 # 20k, 40k
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
 # training
@@ -61,8 +68,25 @@ VMAX = 20.0
 # target critic EMA
 TARGET_EMA = 0.99
 
+# UTIL
+# CLASS_IDS = list(range(NUM_CLASSES))
+# COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
+
+# # HARDCODED WEIGHS
+# IDX_important = torch.tensor([1,2,4,5,6,7,8,12,13,14,15,16,18,19,24], dtype=torch.long)
+# IDX_important = IDX_important[IDX_important < NUM_CLASSES]
+# W_CEL = torch.ones(NUM_CLASSES, device=DEVICE)
+# W_CEL[IDX_important] = 10000
+# W_CEL = W_CEL / torch.sum(W_CEL)
+# # NOTE: indicies definitions are from 0.9.16
+# # importatn indicies: 
+# # Roads=1, SideWalks=2, Wall=4, Fence=5, Pole=6, 
+# # TrafficLight=7, TrafficSign=8, Pedestrian=12, Rider=13, Car=14
+# # Truck=15, Bus=16, Motorcycle=18, Bicycle=19, RoadLine=24
+
+
 # checkpoints
-LOAD_PRETRAINED = True
+LOAD_PRETRAINED = False
 CKPT_DIR = "checkpoints/dreamerv3"
 CKPT_PATH = os.path.join(CKPT_DIR, "dreamerv3_latest.pth")
 
@@ -131,6 +155,9 @@ def make_resets_from_dones(dones_seq: torch.Tensor) -> torch.Tensor:
     resets[:, 1:] = dones_seq[:, :-1]
     return resets
 
+
+
+
 def main():
     print("Device:", DEVICE)
 
@@ -146,15 +173,15 @@ def main():
     # -----------------------
     # Models
     # -----------------------
-    encoder = MultiModalEncoder(latent_dim=1024, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
+    encoder = MultiModalEncoder(latent_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
 
     rssm = RSSM(
-        deter_dim=512,
+        deter_dim=DETER_DIM,
         act_dim=2,
-        embed_dim=1024,   # must match encoder output
+        embed_dim=EMBED_DIM,   # must match encoder output
         goal_dim=2,
-        stoch_categoricals=32,
-        stoch_classes=32,
+        stoch_categoricals=32 *_TUNE,
+        stoch_classes=32 *_TUNE,
         unimix_ratio=0.01,
         kl_balance=0.8,
         free_nats=0.1,
@@ -162,20 +189,20 @@ def main():
 
     Z_DIM = rssm.stoch_dim  # C*K (default 1024)
 
-    decoder = MultiModalDecoder(deter_dim=512, stoch_dim=Z_DIM, num_classes=NUM_CLASSES).to(DEVICE)
+    decoder = MultiModalDecoder(deter_dim=DETER_DIM, stoch_dim=Z_DIM, num_classes=NUM_CLASSES).to(DEVICE)
 
     reward_head = RewardHead(
-        deter_dim=512, stoch_dim=Z_DIM, goal_dim=2,
+        deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2,
         hidden_dim=512, bins=BINS, vmin=VMIN, vmax=VMAX
     ).to(DEVICE)
 
     cont_head = ContinueHead(
-        deter_dim=512, stoch_dim=Z_DIM, goal_dim=2, hidden_dim=512
+        deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2, hidden_dim=512
     ).to(DEVICE)
 
     # ✅ FIXED actor init (no state_dim kwarg)
     actor = Actor(
-        deter_dim=512,
+        deter_dim=DETER_DIM,
         stoch_dim=Z_DIM,
         goal_dim=2,      # keep if you want goal-conditioned behavior
         action_dim=2,
@@ -185,7 +212,7 @@ def main():
     ).to(DEVICE)
 
     critic = Critic(
-        deter_dim=512,
+        deter_dim=DETER_DIM,
         stoch_dim=Z_DIM,
         goal_dim=2,
         hidden_dim=512,
@@ -198,6 +225,9 @@ def main():
 
     # TwoHot helper (shared)
     twohot = TwoHotDist(num_bins=BINS, vmin=VMIN, vmax=VMAX, device=DEVICE).to(DEVICE)
+
+    # # Dice Score calculator
+    # dice_sc_calc = DiceScore(num_classes=NUM_CLASSES, input_format='index').to(DEVICE)
 
     # -----------------------
     # Optims
@@ -247,6 +277,9 @@ def main():
 
             wm_opt.zero_grad(set_to_none=True)
 
+            #####################################################################################
+            # ALMOST SAME AS PHASE B {
+            #####################################################################################
             embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)  # [B*T,E]
             embeds = embeds_flat.view(B, T, -1)
 
@@ -271,8 +304,11 @@ def main():
 
             deter_seq = post["deter"]              # [B,T,D]
             stoch_seq = post["stoch"]              # [B,T,C,K]
+
+            ##### NOT IN PHASE B { #####
             post_logits = post["post_logits"]      # [B,T,C*K]
             prior_logits = post["prior_logits"]    # [B,T,C*K]
+            ##### } NOT IN PHASE B #####
 
             deter_flat = deter_seq.reshape(B * T, -1)
             stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
@@ -286,9 +322,41 @@ def main():
                 print(recon_depth.shape)
                 print(sem_logits.shape)
 
+            # Calc depth loss
             depth_loss = F.mse_loss(recon_depth, depth_in)
-            sem_loss = F.cross_entropy(sem_logits, sem_ids)
 
+            # # Calc semantic loss
+            # # I. Weighted CE Loss
+            # # 1a. use inverse freq of each class as weights
+            # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+            # counts = COUNT_IDS_0.clone()
+            # counts[unique_ids] = freq_ids
+            # w_CEL = 1.0 / (counts + 1)
+            # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+
+            # # # 1b. use hardcoded weights to mark important classes
+            # # w_CEL = W_CEL
+
+            # # 2. weighted CE loss
+            # sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
+
+            # # convert sem_ids [B*T,H,W] from ids into onehots
+            # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
+            # sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
+            # # calc sementic recon loss
+            # sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
+            # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
+            # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
+
+            # # II. Dice Loss
+            # probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
+            # dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
+            # # add dice LOSS to sem_loss
+            # sem_loss += 1 - dice_sc
+            
+            sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
+
+            # Calc KL-loss
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
 
             reward_logits = reward_head(deter_flat, stoch_flat, goal_in)               # [B*T,BINS]
@@ -309,12 +377,18 @@ def main():
                 + CONT_SCALE * cont_loss
             )
             wm_loss.backward()
+            ##### NOT IN PHASE B { #####
             torch.nn.utils.clip_grad_norm_(
                 list(encoder.parameters()) + list(rssm.parameters()) + list(decoder.parameters())
                 + list(reward_head.parameters()) + list(cont_head.parameters()),
                 max_norm=100.0
             )
+            ##### } NOT IN PHASE B #####
             wm_opt.step()
+
+            #####################################################################################
+            # } ALMOST SAME AS PHASE B
+            #####################################################################################
 
             global_step += 1
             if global_step % 10 == 0:
@@ -435,6 +509,9 @@ def main():
                 encoder.train(); rssm.train(); decoder.train(); reward_head.train(); cont_head.train()
                 wm_opt.zero_grad(set_to_none=True)
 
+                #####################################################################################
+                # ALMOST SAME AS PHASE A {
+                #####################################################################################
                 embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)
                 embeds = embeds_flat.view(B, T, -1)
                 resets = make_resets_from_dones(dones_seq)
@@ -462,7 +539,39 @@ def main():
 
                 recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
                 depth_loss = F.mse_loss(recon_depth, depth_in)
-                sem_loss = F.cross_entropy(sem_logits, sem_ids)
+
+                # # Calc semantic loss
+                # # I. Weighted CE Loss
+                # # 1a. use inverse freq of each class as weights
+                # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+                # counts = COUNT_IDS_0.clone()
+                # counts[unique_ids] = freq_ids
+                # w_CEL = 1.0 / (counts + 1)
+                # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+
+                # # # 1b. use hardcoded weights to mark important classes
+                # # w_CEL = W_CEL
+
+                # # 2. weighted CE loss
+                # sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
+
+                # # convert sem_ids [B*T,H,W] from ids into onehots
+                # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
+                # sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
+                # # calc sementic recon loss
+                # sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
+                # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
+                # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
+
+                # # II. Dice Loss
+                # probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
+                # dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
+                # # add dice LOSS to sem_loss
+                # sem_loss += 1.0 - dice_sc
+                
+                sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
+
+                # Calc KL-loss
                 kl_loss = rssm.kl_loss(post["post_logits"], post["prior_logits"])
                 
                 reward_logits = reward_head(deter_flat, stoch_flat, goal_in)          # [B*T, BINS]
@@ -477,8 +586,16 @@ def main():
                 wm_loss = (depth_nll + SEM_SCALE * sem_loss + KL_SCALE * kl_loss + 
                            REWARD_SCALE * reward_loss + CONT_SCALE * cont_loss)
                 wm_loss.backward()
+
+                ##### NOT IN PHASE A { #####
                 torch.nn.utils.clip_grad_norm_(wm_params, max_norm=100.0)
+                ##### } NOT IN PHASE A #####
+                
                 wm_opt.step()
+
+                #####################################################################################
+                # } ALMOST SAME AS PHASE A
+                #####################################################################################
 
                 # ----- Actor/Critic Imagination -----
                 actor.train(); critic.train()
@@ -602,7 +719,7 @@ def main():
                     writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
                     writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
-                    writer.add_histogram("Visuals/Imagined_Rewards", imag_reward, global_step)
+                    # writer.add_histogram("Visuals/Imagined_Rewards", imag_reward, global_step)
                 
                 # # ----- DREAM VISUALIZATION WITH REWARD OVERLAY -----
                 # if global_step % 100 == 0:
@@ -672,15 +789,23 @@ def main():
                         # Convert Logits to IDs: [1, 28, 128, 128] -> [1, 128, 128]
                         r_sem_ids = torch.argmax(sem_logits[0:1], dim=1) 
                         t_sem_ids = sem_ids[0:1]
+
+                        # print("r_sem_ids shape:", r_sem_ids.shape)
+                        # print("t_sem_ids shape:", t_sem_ids.shape)
                         
                         # Normalize IDs to [0, 1] range for visualization (float)
                         # 27 is the max class index (NUM_CLASSES - 1)
-                        t_sem_vis = t_sem_ids.float() / (NUM_CLASSES - 1).float()
-                        r_sem_vis = r_sem_ids.float() / (NUM_CLASSES - 1).float()
+                        t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
+                        r_sem_vis = r_sem_ids.float() / float(NUM_CLASSES - 1)
                         
                         # Add channel dimension back for add_image: [1, 128, 128]
                         t_sem_vis = t_sem_vis.unsqueeze(0)
                         r_sem_vis = r_sem_vis.unsqueeze(0)
+                        
+                        # print("Unsqueezed!")
+                        # print("r_sem_ids shape:", r_sem_vis.shape)
+                        # print("t_sem_ids shape:", t_sem_vis.shape)
+                        # print("Enter")
                         
                         # Concatenate horizontally (GT | Recon)
                         vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
