@@ -7,12 +7,23 @@ import gymnasium as gym
 from gymnasium import spaces
 
 class CarlaEnv(gym.Env):
-    def __init__(self, host='127.0.0.1', port=2000):
+    def __init__(self, town=None, host='127.0.0.1', port=2000):
         super(CarlaEnv, self).__init__()
         # 1. Setup Client and World
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
-        self.world = self.client.get_world()
+        # self.world = self.client.get_world()
+        # if town:
+        #     self.client.load_world(town)
+        
+        if town:
+            # Map name in CARLA often looks like "Town01_Opt" or "Town01"
+            current_map = self.client.get_world().get_map().name
+            if town not in current_map:
+                print(f"Loading {town}...")
+                self.client.load_world(town)
+                
+        self.world = self.client.get_world()    
         self.blueprint_library = self.world.get_blueprint_library()
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0 # NEW: Track impulse reward
@@ -64,6 +75,13 @@ class CarlaEnv(gym.Env):
                 self.route_waypoints.append(next_ws[0])
             else:
                 break
+        
+        # Visualize the route with persistent lines (for debugging)
+        for i in range(len(self.route_waypoints) - 1):
+            start = self.route_waypoints[i].transform.location + carla.Location(z=0.1)
+            end = self.route_waypoints[i+1].transform.location + carla.Location(z=0.1)
+            # Draw a persistent green line connecting the waypoints
+            self.world.debug.draw_line(start, end, thickness=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
 
         self.current_waypoint_index = 1 
 
@@ -125,6 +143,15 @@ class CarlaEnv(gym.Env):
         # Get current target location
         target_loc = self.route_waypoints[self.current_waypoint_index].transform.location
         vehicle_loc = self.vehicle.get_location()
+        
+        # Draw a red "X" at the target waypoint for debugging
+        self.world.debug.draw_string(
+            target_loc + carla.Location(z=1.0), 
+            "X", 
+            draw_shadow=False,
+            color=carla.Color(255, 0, 0), 
+            life_time=0.1
+        )
         
         # Distance check
         dist = vehicle_loc.distance(target_loc)
