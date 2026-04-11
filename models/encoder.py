@@ -10,12 +10,12 @@ class MultiModalEncoder(nn.Module):
         # CNN now gets: depth(1) + sem_emb(E) channels
         in_ch = 1 + sem_embed_dim
         self.cnn = nn.Sequential(
-            nn.Conv2d(in_ch, 32, 4, 2), nn.ReLU(),
-            nn.Conv2d(32, 64, 4, 2), nn.ReLU(),
-            nn.Conv2d(64, 128, 4, 2), nn.ReLU(),
-            nn.Conv2d(128, 256, 4, 2), nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 4)),
-            nn.Flatten(),  # 256*4*4=4096
+            nn.Conv2d(in_ch, 32, 4, 2, 1), nn.ReLU(),   # 128 -> 64
+            nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(),      # 64 -> 32
+            nn.Conv2d(64, 128, 4, 2, 1), nn.ReLU(),     # 32 -> 16
+            nn.Conv2d(128, 256, 4, 2, 1), nn.ReLU(),    # 16 -> 8
+            nn.Conv2d(256, 256, 4, 2, 1), nn.ReLU(),    # 8 -> 4
+            nn.Flatten(),                                # 256*4*4 = 4096
         )
 
         self.vector_fc = nn.Sequential(nn.Linear(3, 64), nn.ReLU())
