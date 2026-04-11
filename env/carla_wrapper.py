@@ -47,6 +47,7 @@ class CarlaEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._cleanup()
+        self.last_data = {"depth": None, "semantic": None}
         time.sleep(1.0)
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0

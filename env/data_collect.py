@@ -4,11 +4,13 @@ import carla
 import numpy as np
 import torch
 from env.carla_wrapper import CarlaEnv
+# from carla_wrapper import CarlaEnv
+
 
 # Configuration
 SAVE_DIR = "./data/expert_sequences"
 TARGET_STEPS = 50000 # 50000
-SEQ_LEN = 50        
+SEQ_LEN = 10 # 50        
 
 def run_collection():
     if not os.path.exists(SAVE_DIR):
