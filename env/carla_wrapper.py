@@ -31,8 +31,8 @@ class CarlaEnv(gym.Env):
         
         # 2. Define Observation and Action Spaces
         self.observation_space = spaces.Dict({
-            "depth": spaces.Box(low=0, high=255, shape=(160, 160, 1), dtype=np.uint8),
-            "semantic": spaces.Box(low=0, high=255, shape=(160, 160, 1), dtype=np.uint8),
+            "depth": spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
+            "semantic": spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
             "vector": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
             "goal": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32) 
         })
@@ -76,12 +76,12 @@ class CarlaEnv(gym.Env):
             else:
                 break
         
-        # Visualize the route with persistent lines (for debugging)
-        for i in range(len(self.route_waypoints) - 1):
-            start = self.route_waypoints[i].transform.location + carla.Location(z=0.1)
-            end = self.route_waypoints[i+1].transform.location + carla.Location(z=0.1)
-            # Draw a persistent green line connecting the waypoints
-            self.world.debug.draw_line(start, end, thickness=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
+        # DEBUG: Visualize the route with persistent lines (for debugging)
+        # for i in range(len(self.route_waypoints) - 1):
+        #     start = self.route_waypoints[i].transform.location + carla.Location(z=0.1)
+        #     end = self.route_waypoints[i+1].transform.location + carla.Location(z=0.1)
+        #     # Draw a persistent green line connecting the waypoints
+        #     self.world.debug.draw_line(start, end, thickness=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
 
         self.current_waypoint_index = 1 
 
@@ -144,14 +144,14 @@ class CarlaEnv(gym.Env):
         target_loc = self.route_waypoints[self.current_waypoint_index].transform.location
         vehicle_loc = self.vehicle.get_location()
         
-        # Draw a red "X" at the target waypoint for debugging
-        self.world.debug.draw_string(
-            target_loc + carla.Location(z=1.0), 
-            "X", 
-            draw_shadow=False,
-            color=carla.Color(255, 0, 0), 
-            life_time=0.1
-        )
+        # DEBUG: Draw a red "X" at the target waypoint for debugging
+        # self.world.debug.draw_string(
+        #     target_loc + carla.Location(z=1.0), 
+        #     "X", 
+        #     draw_shadow=False,
+        #     color=carla.Color(255, 0, 0), 
+        #     life_time=0.1
+        # )
         
         # Distance check
         dist = vehicle_loc.distance(target_loc)
@@ -164,12 +164,12 @@ class CarlaEnv(gym.Env):
 
     def _setup_sensors(self):
         depth_bp = self.blueprint_library.find('sensor.camera.depth')
-        depth_bp.set_attribute('image_size_x', '160')
-        depth_bp.set_attribute('image_size_y', '160')
+        depth_bp.set_attribute('image_size_x', '128')
+        depth_bp.set_attribute('image_size_y', '128')
         
         sem_bp = self.blueprint_library.find('sensor.camera.semantic_segmentation')
-        sem_bp.set_attribute('image_size_x', '160')
-        sem_bp.set_attribute('image_size_y', '160')
+        sem_bp.set_attribute('image_size_x', '128')
+        sem_bp.set_attribute('image_size_y', '128')
 
         transform = carla.Transform(carla.Location(x=1.6, z=1.7))
         self.depth_sensor = self.world.spawn_actor(depth_bp, transform, attach_to=self.vehicle)

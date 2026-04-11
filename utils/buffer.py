@@ -12,8 +12,8 @@ class SequenceBuffer:
         self.full = False
         
         # Pre-allocate memory in RAM (uint8 saves ~75% space vs float32)
-        self.depths = np.zeros((capacity, 160, 160, 1), dtype=np.uint8)
-        self.semantics = np.zeros((capacity, 160, 160, 1), dtype=np.uint8)
+        self.depths = np.zeros((capacity, 128, 128, 1), dtype=np.uint8)
+        self.semantics = np.zeros((capacity, 128, 128, 1), dtype=np.uint8)
         self.goals = np.zeros((capacity, 2), dtype=np.float32)
         self.actions = np.zeros((capacity, 2), dtype=np.float32)
         self.rewards = np.zeros((capacity,), dtype=np.float32)

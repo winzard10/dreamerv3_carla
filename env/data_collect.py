@@ -90,6 +90,10 @@ def run_collection():
 
         obs = next_obs
         
+        if step == 0:
+            print(obs['depth'].shape)
+            print(obs['semantic'].shape)
+        
         # Logging & Reset
         if (step+1) % 100 == 0:
             print(f"Step {step+1}/{TARGET_STEPS} | Last Reward: {reward:.2f}")

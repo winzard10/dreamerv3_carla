@@ -90,20 +90,9 @@ class Critic(nn.Module):
         goal_dim=0,
         hidden_dim=512,
         bins=255,
-        vmin=-5.0,
-        vmax=5.0,
-        eps=1e-8,
-        support_type="uniform",  # "uniform" or "log"
     ):
         super().__init__()
-        assert bins >= 2
-        assert vmax > vmin
         self.goal_dim = goal_dim
-        self.bins = int(bins)
-        self.vmin = float(vmin)
-        self.vmax = float(vmax)
-        self.eps = float(eps)
-        self.support_type = support_type
 
         in_dim = deter_dim + stoch_dim + goal_dim
         self.trunk = nn.Sequential(
@@ -116,20 +105,6 @@ class Critic(nn.Module):
         )
         self.out = nn.Linear(hidden_dim, bins)
 
-        # --- register support as buffer so it moves with .to(device) ---
-        if support_type == "uniform":
-            support = torch.linspace(vmin, vmax, bins)
-        elif support_type == "log":
-            u = torch.linspace(-1.0, 1.0, bins)
-            support = u.sign() * (u.abs() ** 3)  # denser near 0
-            support = (support - support.min()) / (support.max() - support.min() + eps)
-            support = vmin + support * (vmax - vmin)
-            support, _ = torch.sort(support)
-        else:
-            raise ValueError(f"Unknown support_type: {support_type}")
-
-        self.register_buffer("support", support)  # [bins]
-
     def forward(self, deter, stoch_flat, goal=None):
         if self.goal_dim > 0:
             assert goal is not None, "Critic expects goal when goal_dim > 0"
@@ -139,45 +114,3 @@ class Critic(nn.Module):
 
         h = self.trunk(x)
         return self.out(h)  # [..., bins]
-
-    # ----- distribution helpers -----
-
-    def _clamp_target(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.clamp(x, self.vmin, self.vmax)
-
-    def log_probs(self, logits: torch.Tensor) -> torch.Tensor:
-        return F.log_softmax(logits, dim=-1)
-
-    def probs(self, logits: torch.Tensor) -> torch.Tensor:
-        return F.softmax(logits, dim=-1)
-
-    def mean_symlog(self, logits: torch.Tensor) -> torch.Tensor:
-        """
-        Mean in symlog-space: [...]
-        """
-        p = self.probs(logits)
-        return (p * self.support.view(*([1] * (p.ndim - 1)), -1)).sum(dim=-1)
-
-    def mean_value(self, logits: torch.Tensor) -> torch.Tensor:
-        """
-        Mean in raw value space: [...]
-        """
-        return symexp(self.mean_symlog(logits))
-
-    def loss(self, logits: torch.Tensor, target_value: torch.Tensor, reduction="mean") -> torch.Tensor:
-        """
-        Cross-entropy loss against two-hot(symlog(target_value)).
-        target_value: [...] in raw space
-        """
-        target_symlog = symlog(target_value)
-        target_probs = self.two_hot(target_symlog)   # [..., bins]
-        logp = self.log_probs(logits)                # [..., bins]
-        loss = -(target_probs * logp).sum(dim=-1)    # [...]
-
-        if reduction == "mean":
-            return loss.mean()
-        if reduction == "sum":
-            return loss.sum()
-        if reduction == "none":
-            return loss
-        raise ValueError(reduction)
