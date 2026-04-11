@@ -1,4 +1,4 @@
-﻿# train.py
+# train.py
 import os
 import copy
 import random
@@ -8,6 +8,7 @@ import carla
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from utils.laprop import LaProp
 
 from utils.buffer import SequenceBuffer
 from utils.lambda_returns import lambda_return
@@ -218,7 +219,7 @@ def main():
         deter_dim=512, stoch_dim=Z_DIM, goal_dim=2, hidden_dim=512
     ).to(DEVICE)
 
-    # âœ… FIXED actor init (no state_dim kwarg)
+    # ??? FIXED actor init (no state_dim kwarg)
     actor = Actor(
         deter_dim=512,
         stoch_dim=Z_DIM,
@@ -251,10 +252,31 @@ def main():
         + list(reward_head.parameters())
         + list(cont_head.parameters())
     )
-    wm_opt = torch.optim.Adam(wm_params, lr=WM_LR)
+    wm_opt = LaProp(
+        wm_params,
+        lr=WM_LR,
+        betas=(0.9, 0.999),
+        eps=1e-15,
+        weight_decay=0.0,
+        weight_decouple=True,
+    )
 
-    actor_opt = torch.optim.Adam(actor.parameters(), lr=ACTOR_LR, weight_decay=1e-4)
-    critic_opt = torch.optim.Adam(critic.parameters(), lr=CRITIC_LR, weight_decay=1e-4)
+    actor_opt = LaProp(
+        actor.parameters(),
+        lr=ACTOR_LR,
+        betas=(0.9, 0.999),
+        eps=1e-15,
+        weight_decay=1e-4,
+        weight_decouple=True,
+    )
+    critic_opt = LaProp(
+        critic.parameters(),
+        lr=CRITIC_LR,
+        betas=(0.9, 0.999),
+        eps=1e-15,
+        weight_decay=1e-4,
+        weight_decouple=True,
+    )
 
     # -----------------------
     # Phase A: WM pretrain

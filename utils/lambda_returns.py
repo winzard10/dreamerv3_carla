@@ -1,12 +1,14 @@
 # utils/returns.py
 import torch
+from typing import Optional
+
 
 def lambda_return(
     reward: torch.Tensor,         # [B,H,1] or [H,B,1]
     value: torch.Tensor,          # same shape as reward
     discount: torch.Tensor,       # same shape as reward, e.g. gamma * cont_prob
     lam: float = 0.95,
-    bootstrap: torch.Tensor | None = None,  # [B,1] or [H?] depending on layout
+    bootstrap: Optional[torch.Tensor] = None,  # [B,1] or [H?] depending on layout
     time_major: bool = False,
 ) -> torch.Tensor:
     """
@@ -30,7 +32,7 @@ def lambda_return(
         bootstrap = value[-1]  # [B,1]
     # force [B,1]
     bootstrap = bootstrap.view(bootstrap.shape[0], 1)
-    
+
     assert reward.shape == value.shape == discount.shape
     assert reward.ndim == 3 and reward.shape[-1] == 1
 
@@ -39,7 +41,7 @@ def lambda_return(
     next_return = bootstrap
     for t in reversed(range(H)):
         next_value = value_tp1[t]
-        next_return = reward[t] + discount[t] * ((1-lam)*next_value + lam*next_return)
+        next_return = reward[t] + discount[t] * ((1 - lam) * next_value + lam * next_return)
         returns[t] = next_return
 
     if not time_major:
