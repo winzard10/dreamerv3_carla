@@ -318,27 +318,19 @@ def main():
             deter_flat = deter_seq.reshape(B * T, -1)
             stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
-            recon_depth, sem_logits = decoder(
-                deter_flat,
-                stoch_flat,
-                {
-                    "skip16": enc_out["skip16"],
-                    "skip32": enc_out["skip32"],
-                    "skip64": enc_out["skip64"],
-                }
-            )
+            recon_depth, sem_logits = decoder(deter_flat, stoch_flat)
             # recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
             
             # Debug: Check tensor shapes and value ranges
             if step_A == 0:
-                # print(depth_in.shape)       # [B*T, 1, 128, 128]
-                # print(sem_ids.shape)        # [B*T, 128, 128]
-                # print(recon_depth.shape)
-                # print(sem_logits.shape)
-                print(enc_out["embed"].shape)
-                print(enc_out["skip16"].shape)
-                print(deter_flat.shape)
+                print(depth_in.shape)       # [B*T, 1, 128, 128]
+                print(sem_ids.shape)        # [B*T, 128, 128]
                 print(recon_depth.shape)
+                print(sem_logits.shape)
+                # print(enc_out["embed"].shape)
+                # print(enc_out["skip16"].shape)
+                # print(deter_flat.shape)
+                # print(recon_depth.shape)
 
             # Calc depth loss
             depth_loss = F.mse_loss(recon_depth, depth_in)
@@ -565,15 +557,7 @@ def main():
                 deter_flat = deter_seq.reshape(B * T, -1)
                 stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
-                recon_depth, sem_logits = decoder(
-                    deter_flat,
-                    stoch_flat,
-                    {
-                        "skip16": enc_out["skip16"],
-                        "skip32": enc_out["skip32"],
-                        "skip64": enc_out["skip64"],
-                    }
-                )
+                recon_depth, sem_logits = decoder(deter_flat, stoch_flat)
                 # recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 

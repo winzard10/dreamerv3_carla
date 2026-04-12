@@ -13,30 +13,25 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 MODEL_PATH = "./checkpoints/dreamerv3/dreamerv3_latest.pth"
 NUM_CLASSES = 28
-TEST_TOWN = "Town10HD"   # e.g. "Town01", "Town02", "Town10HD"
+TEST_TOWN = "Town10HD"
 
-# Match these to training
+# Match training
 H, W = 128, 128
-DETER_DIM = 512
-EMBED_DIM = 1024
-STOCH_CATEGORICALS = 32
+DETER_DIM = 768 # 512
+EMBED_DIM = 1536 # 1024
+STOCH_CATEGORICALS = 48 # 32
 STOCH_CLASSES = 32
 Z_DIM = STOCH_CATEGORICALS * STOCH_CLASSES
 
-# Visualization flags
 SHOW_RECON = True
 SHOW_SPECTATOR = True
-SHOW_EVERY_N_STEPS = 3   # reduce GUI overhead
+SHOW_EVERY_N_STEPS = 3
 
 
 def colorize_segmentation(seg_ids: np.ndarray, num_classes: int = 28) -> np.ndarray:
-    """
-    Convert [H,W] semantic IDs into a color image [H,W,3].
-    """
     rng = np.random.default_rng(0)
     colors = rng.integers(0, 255, size=(num_classes, 3), dtype=np.uint8)
-    colors[0] = np.array([0, 0, 0], dtype=np.uint8)  # class 0 -> black
-
+    colors[0] = np.array([0, 0, 0], dtype=np.uint8)
     seg_ids = np.clip(seg_ids, 0, num_classes - 1)
     return colors[seg_ids]
 
@@ -76,7 +71,7 @@ def build_models():
         num_classes=NUM_CLASSES,
     ).to(DEVICE)
 
-    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
 
     encoder.load_state_dict(checkpoint["encoder"])
     rssm.load_state_dict(checkpoint["rssm"])
@@ -91,26 +86,58 @@ def build_models():
     return encoder, rssm, actor, decoder
 
 
+def preprocess_obs(obs):
+    depth = (
+        torch.as_tensor(obs["depth"].copy())
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+        .float()
+        .to(DEVICE) / 255.0
+    )  # [1,1,H,W]
+
+    sem = (
+        torch.as_tensor(obs["semantic"].copy())
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+        .long()
+        .to(DEVICE)
+        .clamp(0, NUM_CLASSES - 1)
+    )  # [1,1,H,W]
+
+    vec = torch.as_tensor(
+        obs.get("vector", np.zeros(3, dtype=np.float32)).copy()
+    ).unsqueeze(0).float().to(DEVICE)  # [1,3]
+
+    goal = torch.as_tensor(
+        obs.get("goal", np.zeros(2, dtype=np.float32)).copy()
+    ).unsqueeze(0).float().to(DEVICE)  # [1,2]
+
+    return depth, sem, vec, goal
+
+
 def show_reconstruction_windows(obs, deter, stoch, rssm, decoder):
     with torch.no_grad():
-        stoch_flat = rssm.flatten_stoch(stoch)
-        recon_depth, recon_segm_logits = decoder(deter, stoch_flat, out_hw=(H, W))
+        stoch_flat = rssm.flatten_stoch(stoch)          # [1, C*K]
+        recon_depth, recon_segm_logits = decoder(deter, stoch_flat)
 
     # Ground truth
-    gt_depth = obs["depth"][:, :, 0].astype(np.uint8)         # [H,W]
-    gt_segm = obs["semantic"][:, :, 0].astype(np.uint8)       # [H,W]
+    gt_depth = obs["depth"][:, :, 0].astype(np.uint8)   # [H,W]
+    gt_segm = obs["semantic"][:, :, 0].astype(np.uint8) # [H,W]
 
     # Reconstruction
     recon_depth_np = (
         recon_depth[0, 0].detach().cpu().numpy() * 255.0
     ).clip(0, 255).astype(np.uint8)
 
-    recon_segm_ids = torch.argmax(recon_segm_logits, dim=1)[0].detach().cpu().numpy().astype(np.uint8)
+    recon_segm_ids = (
+        torch.argmax(recon_segm_logits, dim=1)[0]
+        .detach().cpu().numpy().astype(np.uint8)
+    )
 
-    # Depth side-by-side
+    # Depth: GT | Recon
     depth_vis = np.concatenate([gt_depth, recon_depth_np], axis=1)
 
-    # Semantic side-by-side, colorized
+    # Semantic: GT | Recon
     gt_segm_color = colorize_segmentation(gt_segm, NUM_CLASSES)
     recon_segm_color = colorize_segmentation(recon_segm_ids, NUM_CLASSES)
     segm_vis = np.concatenate([gt_segm_color, recon_segm_color], axis=1)
@@ -120,9 +147,7 @@ def show_reconstruction_windows(obs, deter, stoch, rssm, decoder):
     cv2.imshow("Semantic (GT | Recon)", segm_vis_bgr)
 
     key = cv2.waitKey(1) & 0xFF
-    if key == ord("q"):
-        return False
-    return True
+    return key != ord("q")
 
 
 def run_evaluation(town_name: str, num_episodes: int = 5):
@@ -132,11 +157,6 @@ def run_evaluation(town_name: str, num_episodes: int = 5):
     world = env.world
     carla_map = world.get_map()
     spectator = world.get_spectator()
-
-    available_maps = env.client.get_available_maps()
-    print("Available Maps:")
-    for map_name in available_maps:
-        print(f" - {map_name}")
 
     encoder, rssm, actor, decoder = build_models()
 
@@ -166,13 +186,16 @@ def run_evaluation(town_name: str, num_episodes: int = 5):
 
         while not done:
             with torch.no_grad():
-                depth = torch.as_tensor(obs["depth"]).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE) / 255.0
-                sem = torch.as_tensor(obs["semantic"]).permute(2, 0, 1).unsqueeze(0).long().to(DEVICE).clamp(0, NUM_CLASSES - 1)
-                vec = torch.as_tensor(obs["vector"]).unsqueeze(0).float().to(DEVICE)
-                goal = torch.as_tensor(obs["goal"]).unsqueeze(0).float().to(DEVICE)
+                depth, sem, vec, goal = preprocess_obs(obs)
 
-                embed = encoder(depth, sem, vec, goal)
-                deter, stoch, _, _ = rssm.obs_step(deter, stoch, prev_action, embed, goal)
+                # New encoder API: returns dict
+                enc_out = encoder(depth, sem, vec, goal)
+                embed = enc_out["embed"]  # [1, EMBED_DIM]
+
+                # Same as training
+                deter, stoch, _, _ = rssm.obs_step(
+                    deter, stoch, prev_action, embed, goal
+                )
 
                 stoch_flat = rssm.flatten_stoch(stoch)
                 action, _, _, _ = actor(deter, stoch_flat, goal, sample=False)
@@ -181,11 +204,12 @@ def run_evaluation(town_name: str, num_episodes: int = 5):
             if keep_showing and step % SHOW_EVERY_N_STEPS == 0:
                 keep_showing = show_reconstruction_windows(obs, deter, stoch, rssm, decoder)
 
-            obs, reward, terminated, truncated, _ = env.step(action.detach().cpu().numpy()[0])
+            obs, reward, terminated, truncated, _ = env.step(
+                action.detach().cpu().numpy()[0]
+            )
             done = terminated or truncated
 
-            # Metrics
-            ep_speeds.append(obs["vector"][0])
+            ep_speeds.append(float(obs["vector"][0]))
 
             curr_loc = env.vehicle.get_location()
             total_dist += curr_loc.distance(prev_loc)
@@ -193,8 +217,7 @@ def run_evaluation(town_name: str, num_episodes: int = 5):
 
             waypoint = carla_map.get_waypoint(curr_loc)
             ep_center_dist.append(curr_loc.distance(waypoint.transform.location))
-
-            ep_rewards.append(reward)
+            ep_rewards.append(float(reward))
 
             if SHOW_SPECTATOR:
                 v_trans = env.vehicle.get_transform()
@@ -221,13 +244,11 @@ def run_evaluation(town_name: str, num_episodes: int = 5):
 
     cv2.destroyAllWindows()
     env._cleanup()
-
     return town_results
 
 
 def test_all_towns(town):
-    final_report = {}
-    final_report[town] = run_evaluation(town)
+    final_report = {town: run_evaluation(town)}
 
     print("\n" + "=" * 40)
     print("FINAL MULTI-TOWN PERFORMANCE REPORT")
