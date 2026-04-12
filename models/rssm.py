@@ -49,21 +49,60 @@ class RSSM(nn.Module):
         self.kl_balance = float(kl_balance)
         self.free_nats = float(free_nats)
 
-        # GRU input: prev stochastic (flattened) + action
-        self.gru = nn.GRUCell(self.stoch_dim + self.act_dim, self.deter_dim)
+        # # GRU input: prev stochastic (flattened) + action
+        # self.gru = nn.GRUCell(self.stoch_dim + self.act_dim, self.deter_dim)
 
-        # Prior logits from deter
-        self.prior_net = nn.Sequential(
+        # # Prior logits from deter
+        # self.prior_net = nn.Sequential(
+        #     nn.Linear(self.deter_dim, self.deter_dim),
+        #     nn.ELU(),
+        #     nn.Linear(self.deter_dim, self.stoch_dim),
+        # )
+
+        # # Posterior logits from (deter + embed + goal)
+        # self.post_net = nn.Sequential(
+        #     nn.Linear(self.deter_dim + self.embed_dim + self.goal_dim, self.deter_dim),
+        #     nn.ELU(),
+        #     nn.Linear(self.deter_dim, self.stoch_dim),
+        # )
+
+        self.num_blocks = 8
+        assert self.deter_dim % self.num_blocks == 0
+        self.block_dim = self.deter_dim // self.num_blocks
+
+        # self.gru_in = nn.Sequential(
+        #     nn.Linear(self.stoch_dim + self.act_dim + self.deter_dim, self.deter_dim),
+        #     nn.ELU(),
+        # )
+        
+        self.gru_in = nn.Sequential(
+            nn.Linear(self.stoch_dim + self.act_dim + self.deter_dim, self.deter_dim),
+            nn.ELU(),
             nn.Linear(self.deter_dim, self.deter_dim),
             nn.ELU(),
-            nn.Linear(self.deter_dim, self.stoch_dim),
         )
 
-        # Posterior logits from (deter + embed + goal)
-        self.post_net = nn.Sequential(
-            nn.Linear(self.deter_dim + self.embed_dim + self.goal_dim, self.deter_dim),
+        self.gru_blocks = nn.ModuleList([
+            nn.GRUCell(self.block_dim, self.block_dim)
+            for _ in range(self.num_blocks)
+        ])
+        
+        hidden = self.deter_dim * 2
+
+        self.prior_net = nn.Sequential(
+            nn.Linear(self.deter_dim, hidden),
             nn.ELU(),
-            nn.Linear(self.deter_dim, self.stoch_dim),
+            nn.Linear(hidden, hidden),
+            nn.ELU(),
+            nn.Linear(hidden, self.stoch_dim),
+        )
+
+        self.post_net = nn.Sequential(
+            nn.Linear(self.deter_dim + self.embed_dim + self.goal_dim, hidden),
+            nn.ELU(),
+            nn.Linear(hidden, hidden),
+            nn.ELU(),
+            nn.Linear(hidden, self.stoch_dim),
         )
 
     # ----------------------------
@@ -85,6 +124,17 @@ class RSSM(nn.Module):
         uni = torch.full_like(probs, 1.0 / self.K)
         probs = (1.0 - self.unimix_ratio) * probs + self.unimix_ratio * uni
         return probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
+    
+    def _gru_step(self, prev_stoch_flat, action_in, deter_in):
+        mixed = self.gru_in(torch.cat([prev_stoch_flat, action_in, deter_in], dim=-1))  # [B, D]
+
+        x_blocks = torch.chunk(mixed, self.num_blocks, dim=-1)
+        h_blocks = torch.chunk(deter_in, self.num_blocks, dim=-1)
+
+        new_blocks = [
+            gru(xb, hb) for gru, xb, hb in zip(self.gru_blocks, x_blocks, h_blocks)
+        ]
+        return torch.cat(new_blocks, dim=-1)
 
     def dist_from_logits_flat(self, logits_flat: torch.Tensor):
         """
@@ -175,12 +225,13 @@ class RSSM(nn.Module):
         goal_in = goal.view(B, -1)
         deter_in = prev_deter.view(B, -1)
             
-        # 4. Now cat is safe: [16, 1024] + [16, 2] -> [16, 1026]
-        x = torch.cat([prev_stoch_flat, action_in], dim=-1)
+        # # 4. Now cat is safe: [16, 1024] + [16, 2] -> [16, 1026]
+        # x = torch.cat([prev_stoch_flat, action_in], dim=-1)
         
-        # 5. Update GRU
-        deter = self.gru(x, deter_in)
-
+        # # 5. Update GRU
+        # deter = self.gru(x, deter_in)
+        
+        deter = self._gru_step(prev_stoch_flat, action_in, deter_in)
         prior_logits_flat = self.prior_net(deter) 
 
         # 6. Cat for posterior: [16, 512] + [16, 1024] + [16, 2]
@@ -199,8 +250,10 @@ class RSSM(nn.Module):
         deter_in = prev_deter.view(B, -1)
         action_in = action.view(B, -1)
 
-        x = torch.cat([prev_stoch_flat, action_in], dim=-1)
-        deter = self.gru(x, deter_in)
+        # x = torch.cat([prev_stoch_flat, action_in], dim=-1)
+        # deter = self.gru(x, deter_in)
+        
+        deter = self._gru_step(prev_stoch_flat, action_in, deter_in)
 
         prior_logits_flat = self.prior_net(deter)
         prior_logits = self._reshape_logits(prior_logits_flat)
