@@ -369,22 +369,23 @@ def main():
 
                     vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
                     writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
+            
+            if global_step % 100 == 0:
+                os.makedirs(os.path.dirname(PHASE_A_PATH), exist_ok=True)
+                torch.save({
+                    "encoder": encoder.state_dict(),
+                    "rssm": rssm.state_dict(),
+                    "decoder": decoder.state_dict(),
+                    "reward_head": reward_head.state_dict(),
+                    "cont_head": cont_head.state_dict(),
+                    "wm_opt": wm_opt.state_dict(),
+                    "global_step": global_step,
+                }, PHASE_A_PATH)
 
             pbar.set_postfix({
                 "wm": f"{wm_loss.item():.3f}",
                 "kl": f"{kl_loss.item():.3f}",
             })
-
-        os.makedirs(os.path.dirname(PHASE_A_PATH), exist_ok=True)
-        torch.save({
-            "encoder": encoder.state_dict(),
-            "rssm": rssm.state_dict(),
-            "decoder": decoder.state_dict(),
-            "reward_head": reward_head.state_dict(),
-            "cont_head": cont_head.state_dict(),
-            "wm_opt": wm_opt.state_dict(),
-            "global_step": global_step,
-        }, PHASE_A_PATH)
 
     # -----------------------
     # Load full checkpoint (optional)
