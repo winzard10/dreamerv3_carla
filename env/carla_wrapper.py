@@ -28,11 +28,12 @@ class CarlaEnv(gym.Env):
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0 # NEW: Track impulse reward
         self._DISTANCE_TO_CENTERLINE_THRESHOLD = 3.0 # Meters before we consider it "off-road"
-        
+        self.prev_action = None
+
         # 2. Define Observation and Action Spaces
         self.observation_space = spaces.Dict({
-            "depth": spaces.Box(low=0, high=255, shape=(160, 160, 1), dtype=np.uint8),
-            "semantic": spaces.Box(low=0, high=255, shape=(160, 160, 1), dtype=np.uint8),
+            "depth": spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
+            "semantic": spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
             "vector": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
             "goal": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32) 
         })
@@ -46,10 +47,12 @@ class CarlaEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._cleanup()
+        self.last_data = {"depth": None, "semantic": None}
         time.sleep(1.0)
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0
-        
+        self.prev_action = None
+
         settings = self.world.get_settings()
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = 0.05
@@ -76,12 +79,12 @@ class CarlaEnv(gym.Env):
             else:
                 break
         
-        # Visualize the route with persistent lines (for debugging)
-        for i in range(len(self.route_waypoints) - 1):
-            start = self.route_waypoints[i].transform.location + carla.Location(z=0.1)
-            end = self.route_waypoints[i+1].transform.location + carla.Location(z=0.1)
-            # Draw a persistent green line connecting the waypoints
-            self.world.debug.draw_line(start, end, thickness=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
+        # DEBUG: Visualize the route with persistent lines (for debugging)
+        # for i in range(len(self.route_waypoints) - 1):
+        #     start = self.route_waypoints[i].transform.location + carla.Location(z=0.1)
+        #     end = self.route_waypoints[i+1].transform.location + carla.Location(z=0.1)
+        #     # Draw a persistent green line connecting the waypoints
+        #     self.world.debug.draw_line(start, end, thickness=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
 
         self.current_waypoint_index = 1 
 
@@ -121,7 +124,7 @@ class CarlaEnv(gym.Env):
         self._check_waypoint_completion()
 
         obs = self._get_obs()
-        reward = self._calculate_reward()
+        reward = self._calculate_reward(action)
         terminated = self._check_done()
         truncated = False          # time limit etc.
         done = terminated or truncated
@@ -144,14 +147,14 @@ class CarlaEnv(gym.Env):
         target_loc = self.route_waypoints[self.current_waypoint_index].transform.location
         vehicle_loc = self.vehicle.get_location()
         
-        # Draw a red "X" at the target waypoint for debugging
-        self.world.debug.draw_string(
-            target_loc + carla.Location(z=1.0), 
-            "X", 
-            draw_shadow=False,
-            color=carla.Color(255, 0, 0), 
-            life_time=0.1
-        )
+        # DEBUG: Draw a red "X" at the target waypoint for debugging
+        # self.world.debug.draw_string(
+        #     target_loc + carla.Location(z=1.0), 
+        #     "X", 
+        #     draw_shadow=False,
+        #     color=carla.Color(255, 0, 0), 
+        #     life_time=0.1
+        # )
         
         # Distance check
         dist = vehicle_loc.distance(target_loc)
@@ -164,12 +167,12 @@ class CarlaEnv(gym.Env):
 
     def _setup_sensors(self):
         depth_bp = self.blueprint_library.find('sensor.camera.depth')
-        depth_bp.set_attribute('image_size_x', '160')
-        depth_bp.set_attribute('image_size_y', '160')
+        depth_bp.set_attribute('image_size_x', '128')
+        depth_bp.set_attribute('image_size_y', '128')
         
         sem_bp = self.blueprint_library.find('sensor.camera.semantic_segmentation')
-        sem_bp.set_attribute('image_size_x', '160')
-        sem_bp.set_attribute('image_size_y', '160')
+        sem_bp.set_attribute('image_size_x', '128')
+        sem_bp.set_attribute('image_size_y', '128')
 
         transform = carla.Transform(carla.Location(x=1.6, z=1.7))
         self.depth_sensor = self.world.spawn_actor(depth_bp, transform, attach_to=self.vehicle)
@@ -258,7 +261,7 @@ class CarlaEnv(gym.Env):
         
         return cross_prod / norm_AB
         
-    def _calculate_reward(self):
+    def _calculate_reward(self, action):
         v = self.vehicle.get_velocity()
         speed_kmh = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
         
@@ -285,7 +288,28 @@ class CarlaEnv(gym.Env):
         r_idle = -0.05 if speed_kmh < 1.0 else 0.0
         r_offroad = -10.0 if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0 
 
-        total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
+        # Action inconsistency penalty
+        r_smooth = 0.0
+        if self.prev_action is not None:
+            da= np.array(action, dtype=np.float32) - self.prev_action
+            # weighted squared difference
+            r_smooth = -(
+                0.08 * (da[0] ** 2) + # steer change penalty (can be tuned)
+                0.03 * (da[1] ** 2)   # throttle/break change penalty (can be tuned)
+            )
+
+        self.prev_action = np.array(action, dtype=np.float32)
+
+        # Calculate total reward
+        total_reward = (
+            (r_speed * r_center * r_angle)
+            + r_collision + r_stall + r_offroad + r_idle
+            + self.waypoint_reward
+            + r_smooth
+        )
+
+        # total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
+
         return total_reward
 
     def _check_done(self):

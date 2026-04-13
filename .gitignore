@@ -12,7 +12,7 @@ __pycache__/
 
 # Ignore large data/logs
 logs/
-# data/
+data/
 docs/
 checkpoints/
 runs/

@@ -7,7 +7,7 @@ import carla
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from torchmetrics.functional.segmentation import dice_score
+# from torchmetrics.functional.segmentation import dice_score
 
 from utils.buffer import SequenceBuffer
 from utils.lambda_returns import lambda_return
@@ -31,14 +31,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEQ_LEN = 10 # 50
 BATCH_SIZE = 16
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
-H, W = 160, 160
+H, W = 128, 128
 
 _TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing; set to 1 for original setup
 
 DETER_DIM = 512 *_TUNE*_TUNE
 EMBED_DIM = 1024 *_TUNE*_TUNE
 
-PHASE_A_STEPS = 40000 # 20k, 40k
+PHASE_A_STEPS = 20000 # 20k, 40k
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
 # training
@@ -69,24 +69,24 @@ VMAX = 20.0
 TARGET_EMA = 0.99
 
 # UTIL
-CLASS_IDS = list(range(NUM_CLASSES))
-COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
+# CLASS_IDS = list(range(NUM_CLASSES))
+# COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
 
-# HARDCODED WEIGHS
-IDX_important = torch.tensor([1,2,4,5,6,7,8,12,13,14,15,16,18,19,24], dtype=torch.long)
-IDX_important = IDX_important[IDX_important < NUM_CLASSES]
-W_CEL = torch.ones(NUM_CLASSES, device=DEVICE)
-W_CEL[IDX_important] = 10000
-W_CEL = W_CEL / torch.sum(W_CEL)
-# NOTE: indicies definitions are from 0.9.16
-# importatn indicies: 
-# Roads=1, SideWalks=2, Wall=4, Fence=5, Pole=6, 
-# TrafficLight=7, TrafficSign=8, Pedestrian=12, Rider=13, Car=14
-# Truck=15, Bus=16, Motorcycle=18, Bicycle=19, RoadLine=24
+# # HARDCODED WEIGHS
+# IDX_important = torch.tensor([1,2,4,5,6,7,8,12,13,14,15,16,18,19,24], dtype=torch.long)
+# IDX_important = IDX_important[IDX_important < NUM_CLASSES]
+# W_CEL = torch.ones(NUM_CLASSES, device=DEVICE)
+# W_CEL[IDX_important] = 10000
+# W_CEL = W_CEL / torch.sum(W_CEL)
+# # NOTE: indicies definitions are from 0.9.16
+# # importatn indicies: 
+# # Roads=1, SideWalks=2, Wall=4, Fence=5, Pole=6, 
+# # TrafficLight=7, TrafficSign=8, Pedestrian=12, Rider=13, Car=14
+# # Truck=15, Bus=16, Motorcycle=18, Bicycle=19, RoadLine=24
 
 
 # checkpoints
-LOAD_PRETRAINED = True
+LOAD_PRETRAINED = False
 CKPT_DIR = "checkpoints/dreamerv3"
 CKPT_PATH = os.path.join(CKPT_DIR, "dreamerv3_latest.pth")
 
@@ -173,7 +173,7 @@ def main():
     # -----------------------
     # Models
     # -----------------------
-    encoder = MultiModalEncoder(latent_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
+    encoder = MultiModalEncoder(embed_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
 
     rssm = RSSM(
         deter_dim=DETER_DIM,
@@ -212,8 +212,11 @@ def main():
     ).to(DEVICE)
 
     critic = Critic(
-        deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2,
-        hidden_dim=512, bins=BINS, vmin=VMIN, vmax=VMAX
+        deter_dim=DETER_DIM,
+        stoch_dim=Z_DIM,
+        goal_dim=2,
+        hidden_dim=512,
+        bins=BINS,
     ).to(DEVICE)
 
     target_critic = copy.deepcopy(critic).to(DEVICE)
@@ -261,7 +264,7 @@ def main():
         encoder.train(); rssm.train(); decoder.train(); reward_head.train(); cont_head.train()
 
         pbar = tqdm(range(PHASE_A_STEPS), desc="[Phase A] WM pretrain")
-        for _ in pbar:
+        for step_A in pbar:
             batch = buffer.sample(BATCH_SIZE)
             if batch is None:
                 continue
@@ -281,7 +284,7 @@ def main():
             embeds = embeds_flat.view(B, T, -1)
 
             resets = make_resets_from_dones(dones_seq)
-            # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1}, o_t)) ---
+            # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1})) ---
             prev_actions_seq = torch.zeros_like(actions_seq)
             prev_actions_seq[:, 1:] = actions_seq[:, :-1]
             
@@ -290,6 +293,14 @@ def main():
             # -----------------------------------------------------------------------------------
             post = rssm.observe(embeds, prev_actions_seq, goals_seq, resets=resets)
             # print("post stoch shape:", post["stoch"].shape)
+            
+            prev_rewards_seq = torch.zeros_like(rewards_seq)
+            prev_rewards_seq[:, 1:] = rewards_seq[:, :-1]
+            prev_rewards_seq = prev_rewards_seq * (1.0 - resets.float())
+
+            prev_cont_seq = torch.ones_like(dones_seq, dtype=torch.float32)
+            prev_cont_seq[:, 1:] = 1.0 - dones_seq[:, :-1].float()
+            prev_cont_seq = torch.where(resets, torch.ones_like(prev_cont_seq), prev_cont_seq)
 
             deter_seq = post["deter"]              # [B,T,D]
             stoch_seq = post["stoch"]              # [B,T,C,K]
@@ -303,24 +314,31 @@ def main():
             stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
             recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
+            
+            # Debug: Check tensor shapes and value ranges
+            if step_A == 0:
+                print(depth_in.shape)       # [B*T, 1, 128, 128]
+                print(sem_ids.shape)        # [B*T, 128, 128]
+                print(recon_depth.shape)
+                print(sem_logits.shape)
 
             # Calc depth loss
             depth_loss = F.mse_loss(recon_depth, depth_in)
 
-            # Calc semantic loss
-            # I. Weighted CE Loss
-            # 1a. use inverse freq of each class as weights
-            unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
-            counts = COUNT_IDS_0
-            counts[unique_ids] = freq_ids
-            w_CEL = 1.0 / (counts + 1)
-            w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+            # # Calc semantic loss
+            # # I. Weighted CE Loss
+            # # 1a. use inverse freq of each class as weights
+            # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+            # counts = COUNT_IDS_0.clone()
+            # counts[unique_ids] = freq_ids
+            # w_CEL = 1.0 / (counts + 1)
+            # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
 
-            # # 1b. use hardcoded weights to mark important classes
-            # w_CEL = W_CEL
+            # # # 1b. use hardcoded weights to mark important classes
+            # # w_CEL = W_CEL
 
-            # 2. weighted CE loss
-            sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
+            # # 2. weighted CE loss
+            # sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
 
             # # convert sem_ids [B*T,H,W] from ids into onehots
             # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
@@ -335,18 +353,18 @@ def main():
             # dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
             # # add dice LOSS to sem_loss
             # sem_loss += 1 - dice_sc
+            
+            sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
 
             # Calc KL-loss
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
 
             reward_logits = reward_head(deter_flat, stoch_flat, goal_in)               # [B*T,BINS]
-            ##### NOT IN PHASE B { #####
-            reward_target_symlog = symlog(rewards_seq.reshape(-1))             # [B*T]
-            ##### } NOT IN PHASE B #####
+            reward_target_symlog = symlog(prev_rewards_seq.reshape(-1))         # [B*T]
             reward_loss = twohot.ce_loss(reward_logits, reward_target_symlog)
 
             cont_logits   = cont_head(deter_flat, stoch_flat, goal_in)                    # [B*T,1]
-            cont_target = (1.0 - dones_seq.float()).reshape(-1, 1)             # [B*T,1]
+            cont_target = prev_cont_seq.reshape(-1, 1)             # [B*T,1]
             cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
             
             depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
@@ -505,6 +523,14 @@ def main():
                 prev_actions_seq = prev_actions_seq * (1.0 - resets.float().unsqueeze(-1))
                 # -----------------------------------------------------------------------------------
                 post = rssm.observe(embeds, prev_actions_seq, goals_seq, resets=resets)
+                
+                prev_rewards_seq = torch.zeros_like(rewards_seq)
+                prev_rewards_seq[:, 1:] = rewards_seq[:, :-1]
+                prev_rewards_seq = prev_rewards_seq * (1.0 - resets.float())
+
+                prev_cont_seq = torch.ones_like(dones_seq, dtype=torch.float32)
+                prev_cont_seq[:, 1:] = 1.0 - dones_seq[:, :-1].float()
+                prev_cont_seq = torch.where(resets, torch.ones_like(prev_cont_seq), prev_cont_seq)
 
                 deter_seq = post["deter"]
                 stoch_seq = post["stoch"]
@@ -514,20 +540,20 @@ def main():
                 recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 
-                # Calc semantic loss
-                # I. Weighted CE Loss
-                # 1a. use inverse freq of each class as weights
-                unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
-                counts = COUNT_IDS_0
-                counts[unique_ids] = freq_ids
-                w_CEL = 1.0 / (counts + 1)
-                w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+                # # Calc semantic loss
+                # # I. Weighted CE Loss
+                # # 1a. use inverse freq of each class as weights
+                # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+                # counts = COUNT_IDS_0.clone()
+                # counts[unique_ids] = freq_ids
+                # w_CEL = 1.0 / (counts + 1)
+                # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
 
-                # # 1b. use hardcoded weights to mark important classes
-                # w_CEL = W_CEL
+                # # # 1b. use hardcoded weights to mark important classes
+                # # w_CEL = W_CEL
 
-                # 2. weighted CE loss
-                sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
+                # # 2. weighted CE loss
+                # sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
 
                 # # convert sem_ids [B*T,H,W] from ids into onehots
                 # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
@@ -542,15 +568,17 @@ def main():
                 # dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
                 # # add dice LOSS to sem_loss
                 # sem_loss += 1.0 - dice_sc
+                
+                sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
 
                 # Calc KL-loss
                 kl_loss = rssm.kl_loss(post["post_logits"], post["prior_logits"])
                 
                 reward_logits = reward_head(deter_flat, stoch_flat, goal_in)          # [B*T, BINS]
-                reward_loss = twohot.ce_loss(reward_logits, symlog(rewards_seq.reshape(-1)))
+                reward_loss = twohot.ce_loss(reward_logits, symlog(prev_rewards_seq.reshape(-1)))
 
                 cont_logits = cont_head(deter_flat, stoch_flat, goal_in)             # [B*T, 1]
-                cont_target = (1.0 - dones_seq.float()).reshape(-1, 1)
+                cont_target = prev_cont_seq.reshape(-1, 1)
                 cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
                 
                 depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
@@ -588,22 +616,26 @@ def main():
                     imag = rssm.imagine(start_deter, start_stoch, actor, goal0, horizon=IMAG_HORIZON)
 
                     # states
-                    imag_deter = imag["deter"][:, :-1]   # s0..s_{H-1}  shape [B,H,D]
-                    imag_stoch = imag["stoch"][:, :-1]   # s0..s_{H-1}
-                    next_deter = imag["deter"][:, 1:]    # s1..s_H
+                    prev_deter_imag = imag["deter"][:, :-1]   # s0..s_{H-1} for actor/value
+                    prev_stoch_imag = imag["stoch"][:, :-1]
+
+                    next_deter = imag["deter"][:, 1:]         # s1..s_H for reward/continue
                     next_stoch = imag["stoch"][:, 1:]
 
                     Bh = B * IMAG_HORIZON
-                    imag_deter_f = imag_deter.reshape(Bh, -1)
-                    imag_stoch_f = rssm.flatten_stoch(imag_stoch.reshape(Bh, rssm.C, rssm.K))
+
+                    prev_deter_f = prev_deter_imag.reshape(Bh, -1)
+                    prev_stoch_f = rssm.flatten_stoch(prev_stoch_imag.reshape(Bh, rssm.C, rssm.K))
+
+                    next_deter_f = next_deter.reshape(Bh, -1)
+                    next_stoch_f = rssm.flatten_stoch(next_stoch.reshape(Bh, rssm.C, rssm.K))
 
                     goal_h = goal0.unsqueeze(1).expand(B, IMAG_HORIZON, 2).reshape(Bh, 2)
 
-                    # rewards/continue should be predicted at s_t (same length H)
-                    imag_reward_symlog = twohot.mean(reward_head(imag_deter_f, imag_stoch_f, goal_h))
+                    imag_reward_symlog = twohot.mean(reward_head(next_deter_f, next_stoch_f, goal_h))
                     imag_reward = symexp(imag_reward_symlog).view(B, IMAG_HORIZON, 1)
 
-                    imag_cont_logits = cont_head(imag_deter_f, imag_stoch_f, goal_h)
+                    imag_cont_logits = cont_head(next_deter_f, next_stoch_f, goal_h)
                     imag_cont_prob = torch.sigmoid(imag_cont_logits).view(B, IMAG_HORIZON, 1)
                     discounts = (GAMMA * imag_cont_prob).clamp(0.0, 1.0)
 
@@ -668,7 +700,7 @@ def main():
                 critic_opt.zero_grad(set_to_none=True)
 
                 # critic predicts logits in symlog-space distribution bins
-                val_logits = critic(imag_deter_f.detach(), imag_stoch_f.detach(), goal_h.detach())   # [Bh, bins]
+                val_logits = critic(prev_deter_f.detach(), prev_stoch_f.detach(), goal_h.detach())   # [Bh, bins]
 
                 # returns are in RAW space -> convert to symlog target inside ce_loss call
                 critic_loss = twohot.ce_loss(val_logits, symlog(returns.detach().view(-1)))          # [Bh]
@@ -687,7 +719,7 @@ def main():
                     writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
                     writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
-                    writer.add_histogram("Visuals/Imagined_Rewards", imag_reward, global_step)
+                    # writer.add_histogram("Visuals/Imagined_Rewards", imag_reward, global_step)
                 
                 # # ----- DREAM VISUALIZATION WITH REWARD OVERLAY -----
                 # if global_step % 100 == 0:
@@ -701,7 +733,7 @@ def main():
                 #         seq_rewards = imag_reward[0].squeeze(-1) 
                 #         seq_conts = imag_cont_prob[0].squeeze(-1)
                         
-                #         # 3. Decode into frames [H, 1, 160, 160]
+                #         # 3. Decode into frames [H, 1, 128, 128]
                 #         dream_depth, _ = decoder(seq_deter, seq_stoch, out_hw=(H, W))
                         
                 #         # 4. Create a "HUD" (Heads-Up Display)
@@ -730,7 +762,7 @@ def main():
                 #         seq_stoch = rssm.flatten_stoch(imag["stoch"][0]) # [Horizon, C*K]
                         
                 #         # 2. Decode the imagined states into depth maps
-                #         dream_depth, _ = decoder(seq_deter, seq_stoch, out_hw=(H, W)) # [Horizon, 1, 160, 160]
+                #         dream_depth, _ = decoder(seq_deter, seq_stoch, out_hw=(H, W)) # [Horizon, 1, 128, 128]
                         
                 #         # 3. Format for TensorBoard Video: [Batch, Time, Channels, Height, Width]
                 #         # We add a Batch dimension of 1
@@ -742,19 +774,19 @@ def main():
                 if global_step % 100 == 0:
                     with torch.no_grad():
                         # --- 1. PREPARE THE RAW DATA (First image in the batch) ---
-                        # depth_in is [B*T, 1, 160, 160], sem_ids is [B*T, 160, 160]
-                        # recon_depth is [B*T, 1, 160, 160], sem_logits is [B*T, 28, 160, 160]
+                        # depth_in is [B*T, 1, 128, 128], sem_ids is [B*T, 128, 128]
+                        # recon_depth is [B*T, 1, 128, 128], sem_logits is [B*T, 28, 128, 128]
                         
                         # --- 2. DEPTH VISUALIZATION ---
                         t_depth = depth_in[0:1] # Ground Truth
                         r_depth = recon_depth[0:1] # Reconstruction
                         
                         # Concatenate horizontally (GT | Recon)
-                        vis_depth = torch.cat([t_depth, r_depth], dim=-1) # [1, 1, 160, 320]
+                        vis_depth = torch.cat([t_depth, r_depth], dim=-1) # [1, 1, 128, 320]
                         writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
                         
                         # --- 3. SEMANTIC VISUALIZATION ---
-                        # Convert Logits to IDs: [1, 28, 160, 160] -> [1, 160, 160]
+                        # Convert Logits to IDs: [1, 28, 128, 128] -> [1, 128, 128]
                         r_sem_ids = torch.argmax(sem_logits[0:1], dim=1) 
                         t_sem_ids = sem_ids[0:1]
 
@@ -763,10 +795,10 @@ def main():
                         
                         # Normalize IDs to [0, 1] range for visualization (float)
                         # 27 is the max class index (NUM_CLASSES - 1)
-                        t_sem_vis = t_sem_ids.float() / 27.0
-                        r_sem_vis = r_sem_ids.float() / 27.0
+                        t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
+                        r_sem_vis = r_sem_ids.float() / float(NUM_CLASSES - 1)
                         
-                        # Add channel dimension back for add_image: [1, 160, 160]
+                        # Add channel dimension back for add_image: [1, 128, 128]
                         t_sem_vis = t_sem_vis.unsqueeze(0)
                         r_sem_vis = r_sem_vis.unsqueeze(0)
                         
