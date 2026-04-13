@@ -29,7 +29,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # data
 SEQ_LEN = 10 # 50
-BATCH_SIZE = 8
+BATCH_SIZE = 4
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 128, 128
 
@@ -59,6 +59,7 @@ REWARD_SCALE = 1.0
 CONT_SCALE = 1.0
 KL_SCALE = 1.0
 ENT_SCALE = 1e-3
+PRIOR_RECON_SCALE = 0.25
 
 # twohot support
 BINS = 255
@@ -72,6 +73,10 @@ TARGET_EMA = 0.99
 LOAD_PRETRAINED = False
 CKPT_DIR = "checkpoints/dreamerv3"
 CKPT_PATH = os.path.join(CKPT_DIR, "dreamerv3_latest.pth")
+
+IMAG_LOG_EVERY = 100
+IMAG_LOG_HORIZON = 10
+IMAG_LOG_EXAMPLES = 4
 
 
 def ema_update(target: torch.nn.Module, online: torch.nn.Module, tau: float):
@@ -136,7 +141,91 @@ def make_resets_from_dones(dones_seq: torch.Tensor) -> torch.Tensor:
     resets[:, 1:] = dones_seq[:, :-1]
     return resets
 
+def make_strip(images: torch.Tensor) -> torch.Tensor:
+    """
+    images: [T, 1, H, W] or [T, H, W]
+    returns: [1, H, T*W]
+    """
+    if images.ndim == 4:
+        images = images.squeeze(1)
+    assert images.ndim == 3
+    strip = torch.cat([img for img in images], dim=-1)   # [H, T*W]
+    return strip.unsqueeze(0)                            # [1, H, T*W]
 
+
+def semantic_to_vis(sem_ids: torch.Tensor) -> torch.Tensor:
+    """
+    sem_ids: [T, H, W]
+    returns float [T, H, W] in [0, 1]
+    """
+    return sem_ids.float() / float(NUM_CLASSES - 1)
+
+
+@torch.no_grad()
+def log_imagination_rollout(
+    writer,
+    global_step: int,
+    rssm,
+    decoder,
+    actor,
+    start_deter: torch.Tensor,   # [B, D]
+    start_stoch: torch.Tensor,   # [B, C, K]
+    goal0: torch.Tensor,         # [B, 2]
+    horizon: int = 5,
+    tag_prefix: str = "Visuals",
+    num_examples: int = 4,
+):
+    """
+    Logs decoded imagination rollout panels:
+      - Imagined depth rollout
+      - Imagined semantic rollout
+
+    Each row is:
+      seed | imag1 | imag2 | ... | imagH
+    """
+    rssm_was_training = rssm.training
+    decoder_was_training = decoder.training
+    actor_was_training = actor.training
+    
+    rssm.eval()
+    decoder.eval()
+    actor.eval()
+    
+    try:
+        imag = rssm.imagine(start_deter, start_stoch, actor, goal0, horizon=horizon)
+
+        B = imag["deter"].shape[0]
+        n = min(B, num_examples)
+
+        # Decode imagined states (includes seed state at index 0)
+        Bh = B * (horizon + 1)
+        imag_deter_flat = imag["deter"].reshape(Bh, -1)
+        imag_stoch_flat = rssm.flatten_stoch(
+            imag["stoch"].reshape(Bh, rssm.C, rssm.K)
+        )
+
+        recon_depth, sem_logits = decoder(imag_deter_flat, imag_stoch_flat)
+        recon_depth = recon_depth.view(B, horizon + 1, 1, H, W)
+        sem_pred = torch.argmax(sem_logits, dim=1).view(B, horizon + 1, H, W)
+
+        depth_rows = []
+        sem_rows = []
+
+        for i in range(n):
+            depth_strip = make_strip(recon_depth[i])                 # [1, H, (H+1)*W]
+            sem_strip = make_strip(semantic_to_vis(sem_pred[i]))    # [1, H, (H+1)*W]
+            depth_rows.append(depth_strip)
+            sem_rows.append(sem_strip)
+
+        depth_panel = torch.cat(depth_rows, dim=1)  # [1, n*H, total_W]
+        sem_panel = torch.cat(sem_rows, dim=1)      # [1, n*H, total_W]
+
+        writer.add_image(f"{tag_prefix}/Imagined_Depth", depth_panel, global_step)
+        writer.add_image(f"{tag_prefix}/Imagined_Semantic", sem_panel, global_step)
+    finally:
+        rssm.train(rssm_was_training)
+        decoder.train(decoder_was_training)
+        actor.train(actor_was_training)
 
 
 def main():
@@ -159,13 +248,13 @@ def main():
     rssm = RSSM(
         deter_dim=DETER_DIM,
         act_dim=2,
-        embed_dim=EMBED_DIM,   # must match encoder output
+        embed_dim=EMBED_DIM,
         goal_dim=2,
-        stoch_categoricals=32 *_TUNE,
-        stoch_classes=32 *_TUNE,
+        stoch_categoricals=32 * _TUNE,
+        stoch_classes=32 * _TUNE,
         unimix_ratio=0.01,
-        kl_balance=0.8,
-        free_nats=0.1,
+        kl_balance=0.6,
+        free_nats=1.0,
     ).to(DEVICE)
 
     Z_DIM = rssm.stoch_dim  # C*K (default 1024)
@@ -298,17 +387,33 @@ def main():
                 stoch_seq.reshape(B * T, rssm.C, rssm.K)
             )
 
-            # Soft posterior probabilities for reconstruction
+            # -----------------------------
+            # Posterior reconstruction
+            # -----------------------------
             post_logits_flat = post_logits_bt.reshape(B * T, -1)
             _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_flat)
-            stoch_flat_soft = post_probs.reshape(B * T, -1)
+            post_stoch_flat_soft = post_probs.reshape(B * T, -1)
 
-            # Decode using soft posterior
-            recon_depth, sem_logits = decoder(deter_flat, stoch_flat_soft)
+            post_recon_depth, post_sem_logits = decoder(deter_flat, post_stoch_flat_soft)
 
-            # Losses
-            depth_loss = F.mse_loss(recon_depth, depth_in)
-            sem_loss = F.cross_entropy(sem_logits, sem_ids)
+            post_sem_loss = F.cross_entropy(post_sem_logits, sem_ids)
+            post_depth_nll = gaussian_nll(depth_in, post_recon_depth, std=0.1).mean()
+
+            # -----------------------------
+            # Prior reconstruction (auxiliary)
+            # -----------------------------
+            prior_logits_flat = prior_logits_bt.reshape(B * T, -1)
+            _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
+            prior_stoch_flat_soft = prior_probs.reshape(B * T, -1)
+
+            prior_recon_depth, prior_sem_logits = decoder(deter_flat, prior_stoch_flat_soft)
+
+            prior_sem_loss = F.cross_entropy(prior_sem_logits, sem_ids)
+            prior_depth_nll = gaussian_nll(depth_in, prior_recon_depth, std=0.1).mean()
+
+            # -----------------------------
+            # KL
+            # -----------------------------
             kl_loss = rssm.kl_loss(post_logits_bt, prior_logits_bt)
 
             reward_logits = reward_head(deter_flat, stoch_flat_hard, goal_in)
@@ -319,11 +424,12 @@ def main():
             cont_target = prev_cont_seq.reshape(-1, 1)
             cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
 
-            depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
+            post_recon_loss = post_depth_nll + SEM_SCALE * post_sem_loss
+            prior_recon_loss = prior_depth_nll + SEM_SCALE * prior_sem_loss
 
             wm_loss = (
-                depth_nll
-                + SEM_SCALE * sem_loss
+                post_recon_loss
+                + PRIOR_RECON_SCALE * prior_recon_loss
                 + KL_SCALE * kl_loss
                 + REWARD_SCALE * reward_loss
                 + CONT_SCALE * cont_loss
@@ -344,8 +450,10 @@ def main():
 
             if global_step % 10 == 0:
                 writer.add_scalar("Pretrain/wm_loss", wm_loss.item(), global_step)
-                writer.add_scalar("Pretrain/depth_loss", depth_loss.item(), global_step)
-                writer.add_scalar("Pretrain/sem_loss", sem_loss.item(), global_step)
+                writer.add_scalar("Pretrain/post_depth_nll_loss", post_depth_nll.item(), global_step)
+                writer.add_scalar("Pretrain/post_sem_loss", post_sem_loss.item(), global_step)
+                writer.add_scalar("Pretrain/prior_depth_nll_loss", prior_depth_nll.item(), global_step)
+                writer.add_scalar("Pretrain/prior_sem_loss", prior_sem_loss.item(), global_step)
                 writer.add_scalar("Pretrain/kl_loss", kl_loss.item(), global_step)
                 writer.add_scalar("Pretrain/reward_loss", reward_loss.item(), global_step)
                 writer.add_scalar("Pretrain/cont_loss", cont_loss.item(), global_step)
@@ -354,12 +462,12 @@ def main():
                 with torch.no_grad():
                     # Depth GT | Recon
                     t_depth = depth_in[0:1]
-                    r_depth = recon_depth[0:1]
+                    r_depth = post_recon_depth[0:1]
                     vis_depth = torch.cat([t_depth, r_depth], dim=-1)
                     writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
 
                     # Semantic GT | Recon
-                    r_sem_ids = torch.argmax(sem_logits[0:1], dim=1)
+                    r_sem_ids = torch.argmax(post_sem_logits[0:1], dim=1)
                     t_sem_ids = sem_ids[0:1]
 
                     t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
@@ -381,6 +489,26 @@ def main():
                     "wm_opt": wm_opt.state_dict(),
                     "global_step": global_step,
                 }, PHASE_A_PATH)
+            
+            if global_step % IMAG_LOG_EVERY == 0:
+                with torch.no_grad():
+                    start_deter = deter_seq[:, -1].detach()   # [B, D]
+                    start_stoch = stoch_seq[:, -1].detach()   # [B, C, K]
+                    goal0 = goals_seq[:, -1].detach()         # [B, 2]
+
+                    log_imagination_rollout(
+                        writer=writer,
+                        global_step=global_step,
+                        rssm=rssm,
+                        decoder=decoder,
+                        actor=actor,
+                        start_deter=start_deter,
+                        start_stoch=start_stoch,
+                        goal0=goal0,
+                        horizon=IMAG_LOG_HORIZON,
+                        tag_prefix="PhaseA",
+                        num_examples=IMAG_LOG_EXAMPLES,
+                    )
 
             pbar.set_postfix({
                 "wm": f"{wm_loss.item():.3f}",
@@ -546,19 +674,35 @@ def main():
                     stoch_seq.reshape(B * T, rssm.C, rssm.K)
                 )
 
-                # Soft posterior probabilities for reconstruction
+                # -----------------------------
+                # Posterior reconstruction
+                # -----------------------------
                 post_logits_flat = post_logits_bt.reshape(B * T, -1)
                 _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_flat)
-                stoch_flat_soft = post_probs.reshape(B * T, -1)
+                post_stoch_flat_soft = post_probs.reshape(B * T, -1)
 
-                # Decode using soft posterior
-                recon_depth, sem_logits = decoder(deter_flat, stoch_flat_soft)
+                post_recon_depth, post_sem_logits = decoder(deter_flat, post_stoch_flat_soft)
 
-                # Losses
-                depth_loss = F.mse_loss(recon_depth, depth_in)
-                sem_loss = F.cross_entropy(sem_logits, sem_ids)
+                post_sem_loss = F.cross_entropy(post_sem_logits, sem_ids)
+                post_depth_nll = gaussian_nll(depth_in, post_recon_depth, std=0.1).mean()
+
+                # -----------------------------
+                # Prior reconstruction (auxiliary)
+                # -----------------------------
+                prior_logits_flat = prior_logits_bt.reshape(B * T, -1)
+                _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
+                prior_stoch_flat_soft = prior_probs.reshape(B * T, -1)
+
+                prior_recon_depth, prior_sem_logits = decoder(deter_flat, prior_stoch_flat_soft)
+
+                prior_sem_loss = F.cross_entropy(prior_sem_logits, sem_ids)
+                prior_depth_nll = gaussian_nll(depth_in, prior_recon_depth, std=0.1).mean()
+
+                # -----------------------------
+                # KL
+                # -----------------------------
                 kl_loss = rssm.kl_loss(post_logits_bt, prior_logits_bt)
-
+                
                 reward_logits = reward_head(deter_flat, stoch_flat_hard, goal_in)
                 reward_loss = twohot.ce_loss(
                     reward_logits,
@@ -569,11 +713,12 @@ def main():
                 cont_target = prev_cont_seq.reshape(-1, 1)
                 cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
 
-                depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
+                post_recon_loss = post_depth_nll + SEM_SCALE * post_sem_loss
+                prior_recon_loss = prior_depth_nll + SEM_SCALE * prior_sem_loss
 
                 wm_loss = (
-                    depth_nll
-                    + SEM_SCALE * sem_loss
+                    post_recon_loss
+                    + PRIOR_RECON_SCALE * prior_recon_loss
                     + KL_SCALE * kl_loss
                     + REWARD_SCALE * reward_loss
                     + CONT_SCALE * cont_loss
@@ -695,21 +840,23 @@ def main():
                 # ----- Logging -----
                 if global_step % 20 == 0:
                     writer.add_scalar("Train/wm_loss", wm_loss.item(), global_step)
-                    writer.add_scalar("Train/depth_loss", depth_loss.item(), global_step)
-                    writer.add_scalar("Train/sem_loss", sem_loss.item(), global_step)
+                    writer.add_scalar("Train/depth_nll_loss", post_depth_nll.item(), global_step)
+                    writer.add_scalar("Train/sem_loss", post_sem_loss.item(), global_step)
                     writer.add_scalar("Train/kl_loss", kl_loss.item(), global_step)
                     writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
                     writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
+                    writer.add_scalar("Train/prior_depth_nll_loss", prior_depth_nll.item(), global_step)
+                    writer.add_scalar("Train/prior_sem_loss", prior_sem_loss.item(), global_step)
 
                 if global_step % 100 == 0:
                     with torch.no_grad():
                         t_depth = depth_in[0:1]
-                        r_depth = recon_depth[0:1]
+                        r_depth = post_recon_depth[0:1]
                         vis_depth = torch.cat([t_depth, r_depth], dim=-1)
                         writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
 
-                        r_sem_ids = torch.argmax(sem_logits[0:1], dim=1)
+                        r_sem_ids = torch.argmax(post_sem_logits[0:1], dim=1)
                         t_sem_ids = sem_ids[0:1]
 
                         t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
@@ -719,6 +866,26 @@ def main():
 
                         vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
                         writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
+                
+                if global_step % IMAG_LOG_EVERY == 0:
+                    with torch.no_grad():
+                        start_deter = deter_seq[:, -1].detach()
+                        start_stoch = stoch_seq[:, -1].detach()
+                        goal0 = goals_seq[:, -1].detach()
+
+                        log_imagination_rollout(
+                            writer=writer,
+                            global_step=global_step,
+                            rssm=rssm,
+                            decoder=decoder,
+                            actor=actor,
+                            start_deter=start_deter,
+                            start_stoch=start_stoch,
+                            goal0=goal0,
+                            horizon=IMAG_LOG_HORIZON,
+                            tag_prefix="PhaseB",
+                            num_examples=IMAG_LOG_EXAMPLES,
+                        )
 
                 pbar_steps.set_postfix({
                     "rew": f"{episode_reward:.1f}",
