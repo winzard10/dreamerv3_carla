@@ -280,13 +280,8 @@ def main():
             #####################################################################################
             # ALMOST SAME AS PHASE B {
             #####################################################################################
-            # I. Skip
-            enc_out = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)
-            embeds_flat = enc_out["embed"]
+            embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)  # [B*T,E]
             embeds = embeds_flat.view(B, T, -1)
-            # II. No skip
-            # embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)  # [B*T,E]
-            # embeds = embeds_flat.view(B, T, -1)
 
             resets = make_resets_from_dones(dones_seq)
             # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1})) ---
@@ -469,18 +464,11 @@ def main():
                 vec_in = torch.as_tensor(obs.get('vector', np.zeros(3)).copy()).unsqueeze(0).float().to(DEVICE)
                 goal_in = torch.as_tensor(obs.get('goal', np.zeros(2)).copy()).unsqueeze(0).float().to(DEVICE)
 
-                # # Encode vision + state
-                # embed = encoder(depth_in, sem_ids, vec_in, goal_in)
+                # Encode vision + state
+                embed = encoder(depth_in, sem_ids, vec_in, goal_in)
                 
-                # # Update RSSM state based on reality
-                # prev_deter, prev_stoch, _, _ = rssm.obs_step(prev_deter, prev_stoch, prev_action, embed, goal_in)
-                
-                enc_out = encoder(depth_in, sem_ids, vec_in, goal_in)
-                embed = enc_out["embed"]                           # [1, EMBED_DIM]
-
-                prev_deter, prev_stoch, _, _ = rssm.obs_step(
-                    prev_deter, prev_stoch, prev_action, embed, goal_in
-                )
+                # Update RSSM state based on reality
+                prev_deter, prev_stoch, _, _ = rssm.obs_step(prev_deter, prev_stoch, prev_action, embed, goal_in)
 
                 stoch_flat = rssm.flatten_stoch(prev_stoch)
                 # sample=True applies the Actor's predicted std_dev for exploration noise!
@@ -529,13 +517,10 @@ def main():
                 #####################################################################################
                 # ALMOST SAME AS PHASE A {
                 #####################################################################################
-                enc_out = encoder(depth_in, sem_ids, vec_in, goal_in)
-                embeds_flat = enc_out["embed"]
+                embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)
                 embeds = embeds_flat.view(B, T, -1)
-                # embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)
-                # embeds = embeds_flat.view(B, T, -1)
                 resets = make_resets_from_dones(dones_seq)
-                # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1}, o_t)) ---
+                # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1})) ---
                 prev_actions_seq = torch.zeros_like(actions_seq)
                 prev_actions_seq[:, 1:] = actions_seq[:, :-1]
                 
@@ -558,7 +543,6 @@ def main():
                 stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
                 recon_depth, sem_logits = decoder(deter_flat, stoch_flat)
-                # recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 
                 # # Calc semantic loss
