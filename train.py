@@ -29,7 +29,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # data
 SEQ_LEN = 10 # 50
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 128, 128
 
