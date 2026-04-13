@@ -29,7 +29,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # data
 SEQ_LEN = 10 # 50
-BATCH_SIZE = 4
+BATCH_SIZE = 16
 NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 128, 128
 
@@ -68,23 +68,6 @@ VMAX = 20.0
 # target critic EMA
 TARGET_EMA = 0.99
 
-# UTIL
-# CLASS_IDS = list(range(NUM_CLASSES))
-# COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
-
-# # HARDCODED WEIGHS
-# IDX_important = torch.tensor([1,2,4,5,6,7,8,12,13,14,15,16,18,19,24], dtype=torch.long)
-# IDX_important = IDX_important[IDX_important < NUM_CLASSES]
-# W_CEL = torch.ones(NUM_CLASSES, device=DEVICE)
-# W_CEL[IDX_important] = 10000
-# W_CEL = W_CEL / torch.sum(W_CEL)
-# # NOTE: indicies definitions are from 0.9.16
-# # importatn indicies: 
-# # Roads=1, SideWalks=2, Wall=4, Fence=5, Pole=6, 
-# # TrafficLight=7, TrafficSign=8, Pedestrian=12, Rider=13, Car=14
-# # Truck=15, Bus=16, Motorcycle=18, Bicycle=19, RoadLine=24
-
-
 # checkpoints
 LOAD_PRETRAINED = False
 CKPT_DIR = "checkpoints/dreamerv3"
@@ -119,9 +102,7 @@ def preprocess_batch(depths, sems, vectors, goals, actions, rewards, dones):
     # Depth input to encoder + target for decoder in [0,1]
     depth_in = depths.reshape(B * T, 1, H, W).to(dtype=torch.float32) / 255.0
 
-    # Semantic:
-    # IMPORTANT: this assumes sems already contains class IDs [0..NUM_CLASSES-1] stored in that single channel.
-    # If your CARLA wrapper is giving color/palette values 0..255, you MUST fix the wrapper; clamping here will not create correct labels.
+    # Semantic
     sem_ids = sems.reshape(B * T, H, W).to(dtype=torch.long)
     sem_ids = torch.clamp(sem_ids, 0, NUM_CLASSES - 1)
 
@@ -261,7 +242,11 @@ def main():
         global_step = ckptA.get("global_step", 0)
         print(f"Loaded Phase A world model @ step {global_step}")
     else:
-        encoder.train(); rssm.train(); decoder.train(); reward_head.train(); cont_head.train()
+        encoder.train()
+        rssm.train()
+        decoder.train()
+        reward_head.train()
+        cont_head.train()
 
         pbar = tqdm(range(PHASE_A_STEPS), desc="[Phase A] WM pretrain")
         for step_A in pbar:
@@ -273,27 +258,24 @@ def main():
             depth_in, sem_ids, vec_in, goal_in, actions_seq, rewards_seq, dones_seq, goals_seq = preprocess_batch(
                 depths, sems, vectors, goals, actions, rewards, dones
             )
-            B, T = actions_seq.shape[0], actions_seq.shape[1]
+            B, T = actions_seq.shape[:2]
 
             wm_opt.zero_grad(set_to_none=True)
 
-            #####################################################################################
-            # ALMOST SAME AS PHASE B {
-            #####################################################################################
-            embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)  # [B*T,E]
-            embeds = embeds_flat.view(B, T, -1)
+            # Encode observations
+            embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)   # [B*T, E]
+            embeds = embeds_flat.view(B, T, -1)                                      # [B, T, E]
 
+            # Episode resets + previous actions
             resets = make_resets_from_dones(dones_seq)
-            # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1})) ---
             prev_actions_seq = torch.zeros_like(actions_seq)
             prev_actions_seq[:, 1:] = actions_seq[:, :-1]
-            
-            # Zero out the previous action if a reset occurred (start of a new episode)
             prev_actions_seq = prev_actions_seq * (1.0 - resets.float().unsqueeze(-1))
-            # -----------------------------------------------------------------------------------
+
+            # Observe sequence through RSSM
             post = rssm.observe(embeds, prev_actions_seq, goals_seq, resets=resets)
-            # print("post stoch shape:", post["stoch"].shape)
-            
+
+            # Previous reward / continue targets
             prev_rewards_seq = torch.zeros_like(rewards_seq)
             prev_rewards_seq[:, 1:] = rewards_seq[:, :-1]
             prev_rewards_seq = prev_rewards_seq * (1.0 - resets.float())
@@ -302,76 +284,41 @@ def main():
             prev_cont_seq[:, 1:] = 1.0 - dones_seq[:, :-1].float()
             prev_cont_seq = torch.where(resets, torch.ones_like(prev_cont_seq), prev_cont_seq)
 
-            deter_seq = post["deter"]              # [B,T,D]
-            stoch_seq = post["stoch"]              # [B,T,C,K]
+            # RSSM outputs
+            deter_seq = post["deter"]                    # [B, T, D]
+            stoch_seq = post["stoch"]                    # [B, T, C, K]
+            post_logits_bt = post["post_logits"]         # [B, T, C*K]
+            prior_logits_bt = post["prior_logits"]       # [B, T, C*K]
 
-            ##### NOT IN PHASE B { #####
-            post_logits = post["post_logits"]      # [B,T,C*K]
-            prior_logits = post["prior_logits"]    # [B,T,C*K]
-            ##### } NOT IN PHASE B #####
-
+            # Flatten for heads / decoder
             deter_flat = deter_seq.reshape(B * T, -1)
-            stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
-            recon_depth, sem_logits = decoder(deter_flat, stoch_flat)
-            # recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
-            
-            # Debug: Check tensor shapes and value ranges
-            if step_A == 0:
-                print(depth_in.shape)       # [B*T, 1, 128, 128]
-                print(sem_ids.shape)        # [B*T, 128, 128]
-                print(recon_depth.shape)
-                print(sem_logits.shape)
-                # print(enc_out["embed"].shape)
-                # print(enc_out["skip16"].shape)
-                # print(deter_flat.shape)
-                # print(recon_depth.shape)
+            # Hard stochastic state for reward/continue heads
+            stoch_flat_hard = rssm.flatten_stoch(
+                stoch_seq.reshape(B * T, rssm.C, rssm.K)
+            )
 
-            # Calc depth loss
+            # Soft posterior probabilities for reconstruction
+            post_logits_flat = post_logits_bt.reshape(B * T, -1)
+            _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_flat)
+            stoch_flat_soft = post_probs.reshape(B * T, -1)
+
+            # Decode using soft posterior
+            recon_depth, sem_logits = decoder(deter_flat, stoch_flat_soft)
+
+            # Losses
             depth_loss = F.mse_loss(recon_depth, depth_in)
+            sem_loss = F.cross_entropy(sem_logits, sem_ids)
+            kl_loss = rssm.kl_loss(post_logits_bt, prior_logits_bt)
 
-            # # Calc semantic loss
-            # # I. Weighted CE Loss
-            # # 1a. use inverse freq of each class as weights
-            # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
-            # counts = COUNT_IDS_0.clone()
-            # counts[unique_ids] = freq_ids
-            # w_CEL = 1.0 / (counts + 1)
-            # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
-
-            # # # 1b. use hardcoded weights to mark important classes
-            # # w_CEL = W_CEL
-
-            # # 2. weighted CE loss
-            # sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
-
-            # # convert sem_ids [B*T,H,W] from ids into onehots
-            # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
-            # sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
-            # # calc sementic recon loss
-            # sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
-            # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
-            # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
-
-            # # II. Dice Loss
-            # probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
-            # dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
-            # # add dice LOSS to sem_loss
-            # sem_loss += 1 - dice_sc
-            
-            sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
-
-            # Calc KL-loss
-            kl_loss = rssm.kl_loss(post_logits, prior_logits)
-
-            reward_logits = reward_head(deter_flat, stoch_flat, goal_in)               # [B*T,BINS]
-            reward_target_symlog = symlog(prev_rewards_seq.reshape(-1))         # [B*T]
+            reward_logits = reward_head(deter_flat, stoch_flat_hard, goal_in)
+            reward_target_symlog = symlog(prev_rewards_seq.reshape(-1))
             reward_loss = twohot.ce_loss(reward_logits, reward_target_symlog)
 
-            cont_logits   = cont_head(deter_flat, stoch_flat, goal_in)                    # [B*T,1]
-            cont_target = prev_cont_seq.reshape(-1, 1)             # [B*T,1]
+            cont_logits = cont_head(deter_flat, stoch_flat_hard, goal_in)
+            cont_target = prev_cont_seq.reshape(-1, 1)
             cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
-            
+
             depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
 
             wm_loss = (
@@ -381,21 +328,20 @@ def main():
                 + REWARD_SCALE * reward_loss
                 + CONT_SCALE * cont_loss
             )
+
             wm_loss.backward()
-            ##### NOT IN PHASE B { #####
             torch.nn.utils.clip_grad_norm_(
-                list(encoder.parameters()) + list(rssm.parameters()) + list(decoder.parameters())
-                + list(reward_head.parameters()) + list(cont_head.parameters()),
-                max_norm=100.0
+                list(encoder.parameters())
+                + list(rssm.parameters())
+                + list(decoder.parameters())
+                + list(reward_head.parameters())
+                + list(cont_head.parameters()),
+                max_norm=100.0,
             )
-            ##### } NOT IN PHASE B #####
             wm_opt.step()
 
-            #####################################################################################
-            # } ALMOST SAME AS PHASE B
-            #####################################################################################
-
             global_step += 1
+
             if global_step % 10 == 0:
                 writer.add_scalar("Pretrain/wm_loss", wm_loss.item(), global_step)
                 writer.add_scalar("Pretrain/depth_loss", depth_loss.item(), global_step)
@@ -404,7 +350,30 @@ def main():
                 writer.add_scalar("Pretrain/reward_loss", reward_loss.item(), global_step)
                 writer.add_scalar("Pretrain/cont_loss", cont_loss.item(), global_step)
 
-            pbar.set_postfix({"wm": f"{wm_loss.item():.3f}", "kl": f"{kl_loss.item():.3f}"})
+            if global_step % 100 == 0:
+                with torch.no_grad():
+                    # Depth GT | Recon
+                    t_depth = depth_in[0:1]
+                    r_depth = recon_depth[0:1]
+                    vis_depth = torch.cat([t_depth, r_depth], dim=-1)
+                    writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
+
+                    # Semantic GT | Recon
+                    r_sem_ids = torch.argmax(sem_logits[0:1], dim=1)
+                    t_sem_ids = sem_ids[0:1]
+
+                    t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
+                    r_sem_vis = r_sem_ids.float() / float(NUM_CLASSES - 1)
+                    t_sem_vis = t_sem_vis.unsqueeze(0)
+                    r_sem_vis = r_sem_vis.unsqueeze(0)
+
+                    vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
+                    writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
+
+            pbar.set_postfix({
+                "wm": f"{wm_loss.item():.3f}",
+                "kl": f"{kl_loss.item():.3f}",
+            })
 
         os.makedirs(os.path.dirname(PHASE_A_PATH), exist_ok=True)
         torch.save({
@@ -442,93 +411,119 @@ def main():
     print("\n[Phase B] Starting Online Interaction with CARLA...")
     env = CarlaEnv()
     spectator = env.world.get_spectator()
-    
+
     start_episode = ckpt.get("episode", 0) if (LOAD_PRETRAINED and os.path.exists(CKPT_PATH)) else 0
-    
+
     for episode in range(start_episode + 1, PART_B_EPISODE + 1):
         obs, _ = env.reset()
-        episode_reward = 0
-        
+        episode_reward = 0.0
+
         # Initialize RSSM state for the new episode
         prev_deter, prev_stoch = rssm.initial(1, device=DEVICE)
         prev_action = torch.zeros(1, 2, device=DEVICE)
-        
-        pbar_steps = tqdm(range(PHASE_B_STEPS), desc=f"Episode {episode}", leave=False) # Max 2000 steps per ep
-        for step in pbar_steps:
-            # --- 1. Environment Interaction (Perception & Action) ---
-            with torch.no_grad():
-                # Prepare observations (Batch Size 1)
-                depth_in = torch.as_tensor(obs['depth'].copy()).permute(2,0,1).unsqueeze(0).float().to(DEVICE) / 255.0
-                sem_ids = torch.as_tensor(obs['semantic'].copy()).permute(2,0,1).unsqueeze(0).long().to(DEVICE).clamp(0, NUM_CLASSES - 1)
-                
-                vec_in = torch.as_tensor(obs.get('vector', np.zeros(3)).copy()).unsqueeze(0).float().to(DEVICE)
-                goal_in = torch.as_tensor(obs.get('goal', np.zeros(2)).copy()).unsqueeze(0).float().to(DEVICE)
 
-                # Encode vision + state
+        pbar_steps = tqdm(range(PHASE_B_STEPS), desc=f"Episode {episode}", leave=False)
+        for step in pbar_steps:
+            # -----------------------
+            # 1) Environment interaction
+            # -----------------------
+            with torch.no_grad():
+                depth_in = (
+                    torch.as_tensor(obs["depth"].copy())
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .float()
+                    .to(DEVICE) / 255.0
+                )
+                sem_ids = (
+                    torch.as_tensor(obs["semantic"].copy())
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .long()
+                    .to(DEVICE)
+                    .clamp(0, NUM_CLASSES - 1)
+                )
+                vec_in = torch.as_tensor(
+                    obs.get("vector", np.zeros(3)).copy()
+                ).unsqueeze(0).float().to(DEVICE)
+                goal_in = torch.as_tensor(
+                    obs.get("goal", np.zeros(2)).copy()
+                ).unsqueeze(0).float().to(DEVICE)
+
                 embed = encoder(depth_in, sem_ids, vec_in, goal_in)
-                
-                # Update RSSM state based on reality
-                prev_deter, prev_stoch, _, _ = rssm.obs_step(prev_deter, prev_stoch, prev_action, embed, goal_in)
+
+                prev_deter, prev_stoch, _, _ = rssm.obs_step(
+                    prev_deter, prev_stoch, prev_action, embed, goal_in
+                )
 
                 stoch_flat = rssm.flatten_stoch(prev_stoch)
-                # sample=True applies the Actor's predicted std_dev for exploration noise!
-                action_th, _, _, _ = actor(prev_deter, stoch_flat, goal_in, sample=True) 
-                
-            # Step CARLA
+                action_th, _, _, _ = actor(prev_deter, stoch_flat, goal_in, sample=True)
+
             act_np = action_th.cpu().numpy()[0]
             next_obs, reward, terminated, truncated, info = env.step(act_np)
             done = terminated or truncated
-            
-            # DEBUG: Check if RSSM state is blowing up (NaN check)
+
             if torch.isnan(prev_deter).any():
                 print("[CRITICAL] RSSM Deterministic state contains NaNs!")
-            # DEBUG: Check Actor exploration
-            # print(f"[DEBUG Online] Step {step} | Reward: {reward:.2f} | Action (Steer/Throt): {act_np[0]:.2f}/{act_np[1]:.2f}")
-            
-            # Update Spectator Camera (Optional, for viewing)
+
+            # Spectator camera
             v_transform = env.vehicle.get_transform()
-            back_pos = v_transform.location - (v_transform.get_forward_vector() * 8.0) + carla.Location(z=4.0)
+            back_pos = (
+                v_transform.location
+                - (v_transform.get_forward_vector() * 8.0)
+                + carla.Location(z=4.0)
+            )
             spectator.set_transform(carla.Transform(back_pos, v_transform.rotation))
 
-            # Store in Buffer
-            buffer.add(obs['depth'], obs['semantic'], obs.get('vector', np.zeros(3)), 
-                       obs.get('goal', np.zeros(2)), act_np, reward, done)
-            
+            # Store transition
+            buffer.add(
+                obs["depth"],
+                obs["semantic"],
+                obs.get("vector", np.zeros(3)),
+                obs.get("goal", np.zeros(2)),
+                act_np,
+                reward,
+                done,
+            )
+
             episode_reward += reward
             obs = next_obs
             prev_action = action_th.detach()
             global_step += 1
 
-            # --- 2. Model Updates (Learning from Buffer) ---
+            # -----------------------
+            # 2) Model updates
+            # -----------------------
             if global_step % TRAIN_EVERY == 0 and buffer.idx > BATCH_SIZE:
                 batch = buffer.sample(BATCH_SIZE)
-                if batch is None: continue
+                if batch is None:
+                    continue
+
                 depths, sems, vectors, goals, actions, rewards, dones = batch
-                
                 depth_in, sem_ids, vec_in, goal_in, actions_seq, rewards_seq, dones_seq, goals_seq = preprocess_batch(
                     depths, sems, vectors, goals, actions, rewards, dones
                 )
-                B, T = actions_seq.shape[0], actions_seq.shape[1]
+                B, T = actions_seq.shape[:2]
 
-                # ----- World Model Update -----
-                encoder.train(); rssm.train(); decoder.train(); reward_head.train(); cont_head.train()
+                # ----- World model update -----
+                encoder.train()
+                rssm.train()
+                decoder.train()
+                reward_head.train()
+                cont_head.train()
                 wm_opt.zero_grad(set_to_none=True)
 
-                #####################################################################################
-                # ALMOST SAME AS PHASE A {
-                #####################################################################################
                 embeds_flat = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in)
                 embeds = embeds_flat.view(B, T, -1)
+
                 resets = make_resets_from_dones(dones_seq)
-                # --- NEW: Shift actions to align with causality (s_t = f(s_{t-1}, a_{t-1})) ---
+
                 prev_actions_seq = torch.zeros_like(actions_seq)
                 prev_actions_seq[:, 1:] = actions_seq[:, :-1]
-                
-                # Zero out the previous action if a reset occurred (start of a new episode)
                 prev_actions_seq = prev_actions_seq * (1.0 - resets.float().unsqueeze(-1))
-                # -----------------------------------------------------------------------------------
+
                 post = rssm.observe(embeds, prev_actions_seq, goals_seq, resets=resets)
-                
+
                 prev_rewards_seq = torch.zeros_like(rewards_seq)
                 prev_rewards_seq[:, 1:] = rewards_seq[:, :-1]
                 prev_rewards_seq = prev_rewards_seq * (1.0 - resets.float())
@@ -537,94 +532,77 @@ def main():
                 prev_cont_seq[:, 1:] = 1.0 - dones_seq[:, :-1].float()
                 prev_cont_seq = torch.where(resets, torch.ones_like(prev_cont_seq), prev_cont_seq)
 
-                deter_seq = post["deter"]
-                stoch_seq = post["stoch"]
+                # RSSM outputs
+                deter_seq = post["deter"]                    # [B, T, D]
+                stoch_seq = post["stoch"]                    # [B, T, C, K]
+                post_logits_bt = post["post_logits"]         # [B, T, C*K]
+                prior_logits_bt = post["prior_logits"]       # [B, T, C*K]
+
                 deter_flat = deter_seq.reshape(B * T, -1)
-                stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
-                recon_depth, sem_logits = decoder(deter_flat, stoch_flat)
+                # Hard stochastic state for reward / continue / imagination seed
+                stoch_flat_hard = rssm.flatten_stoch(
+                    stoch_seq.reshape(B * T, rssm.C, rssm.K)
+                )
+
+                # Soft posterior probabilities for reconstruction
+                post_logits_flat = post_logits_bt.reshape(B * T, -1)
+                _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_flat)
+                stoch_flat_soft = post_probs.reshape(B * T, -1)
+
+                # Decode using soft posterior
+                recon_depth, sem_logits = decoder(deter_flat, stoch_flat_soft)
+
+                # Losses
                 depth_loss = F.mse_loss(recon_depth, depth_in)
+                sem_loss = F.cross_entropy(sem_logits, sem_ids)
+                kl_loss = rssm.kl_loss(post_logits_bt, prior_logits_bt)
 
-                # # Calc semantic loss
-                # # I. Weighted CE Loss
-                # # 1a. use inverse freq of each class as weights
-                # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
-                # counts = COUNT_IDS_0.clone()
-                # counts[unique_ids] = freq_ids
-                # w_CEL = 1.0 / (counts + 1)
-                # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+                reward_logits = reward_head(deter_flat, stoch_flat_hard, goal_in)
+                reward_loss = twohot.ce_loss(
+                    reward_logits,
+                    symlog(prev_rewards_seq.reshape(-1)),
+                )
 
-                # # # 1b. use hardcoded weights to mark important classes
-                # # w_CEL = W_CEL
-
-                # # 2. weighted CE loss
-                # sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
-
-                # # convert sem_ids [B*T,H,W] from ids into onehots
-                # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
-                # sem_ids_oh = torch.permute(sem_ids_oh, (0,3,1,2))                     # [B*T,C,H,W]
-                # # calc sementic recon loss
-                # sem_loss = F.cross_entropy(sem_logits, sem_ids_oh)     # decoder loss function: cross entropy
-                # # NOTE from John (FIXED): potential error: sem_logits has C=NUM_CLASSES, but sem_ids has C=1, ie: we are comparing one-hot vector to an int!
-                # # To use cross_entropy correctly, sem_ids (ground-truth) should be converted to one-hot vectors
-
-                # # II. Dice Loss
-                # probs = F.softmax(sem_logits, dim=1)    # softmax on C-dim
-                # dice_sc = dice_score(probs.argmax(1), sem_ids, num_classes=NUM_CLASSES, input_format='index', aggregation_level="global").item()
-                # # add dice LOSS to sem_loss
-                # sem_loss += 1.0 - dice_sc
-                
-                sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
-
-                # Calc KL-loss
-                kl_loss = rssm.kl_loss(post["post_logits"], post["prior_logits"])
-                
-                reward_logits = reward_head(deter_flat, stoch_flat, goal_in)          # [B*T, BINS]
-                reward_loss = twohot.ce_loss(reward_logits, symlog(prev_rewards_seq.reshape(-1)))
-
-                cont_logits = cont_head(deter_flat, stoch_flat, goal_in)             # [B*T, 1]
+                cont_logits = cont_head(deter_flat, stoch_flat_hard, goal_in)
                 cont_target = prev_cont_seq.reshape(-1, 1)
                 cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
-                
+
                 depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
 
-                wm_loss = (depth_nll + SEM_SCALE * sem_loss + KL_SCALE * kl_loss + 
-                           REWARD_SCALE * reward_loss + CONT_SCALE * cont_loss)
-                wm_loss.backward()
+                wm_loss = (
+                    depth_nll
+                    + SEM_SCALE * sem_loss
+                    + KL_SCALE * kl_loss
+                    + REWARD_SCALE * reward_loss
+                    + CONT_SCALE * cont_loss
+                )
 
-                ##### NOT IN PHASE A { #####
+                wm_loss.backward()
                 torch.nn.utils.clip_grad_norm_(wm_params, max_norm=100.0)
-                ##### } NOT IN PHASE A #####
-                
                 wm_opt.step()
 
-                #####################################################################################
-                # } ALMOST SAME AS PHASE A
-                #####################################################################################
-
-                # ----- Actor/Critic Imagination -----
-                actor.train(); critic.train()
+                # ----- Actor / Critic imagination -----
+                actor.train()
+                critic.train()
 
                 start_deter = deter_seq[:, -1].detach()
                 start_stoch = stoch_seq[:, -1].detach()
                 goal0 = goals_seq[:, -1].detach()
 
-                # Freeze world model params
                 for p in wm_params:
                     p.requires_grad_(False)
 
                 try:
-                    # Freeze critic params during actor update
                     for p in critic.parameters():
                         p.requires_grad_(False)
 
                     imag = rssm.imagine(start_deter, start_stoch, actor, goal0, horizon=IMAG_HORIZON)
 
-                    # states
-                    prev_deter_imag = imag["deter"][:, :-1]   # s0..s_{H-1} for actor/value
+                    prev_deter_imag = imag["deter"][:, :-1]
                     prev_stoch_imag = imag["stoch"][:, :-1]
 
-                    next_deter = imag["deter"][:, 1:]         # s1..s_H for reward/continue
+                    next_deter = imag["deter"][:, 1:]
                     next_stoch = imag["stoch"][:, 1:]
 
                     Bh = B * IMAG_HORIZON
@@ -637,63 +615,56 @@ def main():
 
                     goal_h = goal0.unsqueeze(1).expand(B, IMAG_HORIZON, 2).reshape(Bh, 2)
 
-                    imag_reward_symlog = twohot.mean(reward_head(next_deter_f, next_stoch_f, goal_h))
+                    imag_reward_symlog = twohot.mean(
+                        reward_head(next_deter_f, next_stoch_f, goal_h)
+                    )
                     imag_reward = symexp(imag_reward_symlog).view(B, IMAG_HORIZON, 1)
 
                     imag_cont_logits = cont_head(next_deter_f, next_stoch_f, goal_h)
                     imag_cont_prob = torch.sigmoid(imag_cont_logits).view(B, IMAG_HORIZON, 1)
                     discounts = (GAMMA * imag_cont_prob).clamp(0.0, 1.0)
 
-                    # values should be V(s_t) for t=0..H, so compute on imag["deter"] (H+1)
                     Bh1 = B * (IMAG_HORIZON + 1)
                     all_deter_f = imag["deter"].reshape(Bh1, -1)
                     all_stoch_f = rssm.flatten_stoch(imag["stoch"].reshape(Bh1, rssm.C, rssm.K))
                     goal_h1 = goal0.unsqueeze(1).expand(B, IMAG_HORIZON + 1, 2).reshape(Bh1, 2)
 
                     with torch.no_grad():
-                        target_v_symlog = twohot.mean(target_critic(all_deter_f, all_stoch_f, goal_h1))
+                        target_v_symlog = twohot.mean(
+                            target_critic(all_deter_f, all_stoch_f, goal_h1)
+                        )
                         target_v = symexp(target_v_symlog).view(B, IMAG_HORIZON + 1, 1)
 
                     v_symlog = twohot.mean(critic(all_deter_f, all_stoch_f, goal_h1))
                     v = symexp(v_symlog).view(B, IMAG_HORIZON + 1, 1)
 
-                    # lambda return uses V(s_{t+1}) inside recursion, but your function expects value indexed with reward
-                    # easiest: pass value = target_v[:, :-1] (V(s_t)) and bootstrap = target_v[:, -1] (V(s_H))
                     returns = lambda_return(
-                        reward=imag_reward,                   # [B,H,1] = r_t
-                        value=target_v[:, :-1],               # [B,H,1] = V(s_t)
-                        discount=discounts,                   # [B,H,1] = gamma_t
+                        reward=imag_reward,
+                        value=target_v[:, :-1],
+                        discount=discounts,
                         lam=LAMBDA,
-                        bootstrap=target_v[:, -1],            # [B,1]   = V(s_H)
-                        time_major=False
-                    )  # [B,H,1]
+                        bootstrap=target_v[:, -1],
+                        time_major=False,
+                    )
 
-                    # weight_t = prod_{i < t} discounts_i
-                    # (prepend 1.0 for t=0)
                     weights = torch.cumprod(
-                        torch.cat([torch.ones(B, 1, 1, device=DEVICE), discounts[:, :-1]], dim=1),
-                        dim=1
-                    )  # [B,H,1]
-                    
-                    # advantage baseline: compare returns vs V(s_t)
-                    adv = returns - v[:, :-1].detach()
+                        torch.cat(
+                            [torch.ones(B, 1, 1, device=DEVICE), discounts[:, :-1]],
+                            dim=1,
+                        ),
+                        dim=1,
+                    )
 
-                    # V3-ish normalization (strongly recommended)
+                    adv = returns - v[:, :-1].detach()
                     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-                    # ---------- actor loss: weighted advantage (baseline) + entropy bonus ----------
                     actor_opt.zero_grad(set_to_none=True)
-                    actor_loss = -(weights * adv).mean() - ENT_SCALE * (weights * imag["ent"].unsqueeze(-1)).mean()
+                    actor_loss = -(weights * adv).mean() - ENT_SCALE * (
+                        weights * imag["ent"].unsqueeze(-1)
+                    ).mean()
                     actor_loss.backward()
                     torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=100.0)
                     actor_opt.step()
-                    
-                    assert imag_reward.shape == (B, IMAG_HORIZON, 1)
-                    assert discounts.shape == (B, IMAG_HORIZON, 1)
-                    assert target_v.shape == (B, IMAG_HORIZON + 1, 1)
-                    assert v.shape == (B, IMAG_HORIZON + 1, 1)
-                    assert returns.shape == (B, IMAG_HORIZON, 1)
-                    assert imag["ent"].shape == (B, IMAG_HORIZON)
 
                 finally:
                     for p in critic.parameters():
@@ -701,14 +672,19 @@ def main():
                     for p in wm_params:
                         p.requires_grad_(True)
 
-                # Critic update (normal)
+                # ----- Critic update -----
                 critic_opt.zero_grad(set_to_none=True)
 
-                # critic predicts logits in symlog-space distribution bins
-                val_logits = critic(prev_deter_f.detach(), prev_stoch_f.detach(), goal_h.detach())   # [Bh, bins]
+                val_logits = critic(
+                    prev_deter_f.detach(),
+                    prev_stoch_f.detach(),
+                    goal_h.detach(),
+                )
 
-                # returns are in RAW space -> convert to symlog target inside ce_loss call
-                critic_loss = twohot.ce_loss(val_logits, symlog(returns.detach().view(-1)))          # [Bh]
+                critic_loss = twohot.ce_loss(
+                    val_logits,
+                    symlog(returns.detach().view(-1)),
+                )
                 critic_loss.backward()
 
                 torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=100.0)
@@ -724,115 +700,51 @@ def main():
                     writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
                     writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
-                    # writer.add_histogram("Visuals/Imagined_Rewards", imag_reward, global_step)
-                
-                # # ----- DREAM VISUALIZATION WITH REWARD OVERLAY -----
-                # if global_step % 100 == 0:
-                #     with torch.no_grad():
-                #         # 1. Prepare 15-step dream data for the first batch item
-                #         seq_deter = imag["deter"][0]  
-                #         seq_stoch = rssm.flatten_stoch(imag["stoch"][0]) 
-                        
-                #         # 2. Get the scores the Critic/Reward model gave this dream
-                #         # imag_reward was [B, H, 1] -> we take [H]
-                #         seq_rewards = imag_reward[0].squeeze(-1) 
-                #         seq_conts = imag_cont_prob[0].squeeze(-1)
-                        
-                #         # 3. Decode into frames [H, 1, 128, 128]
-                #         dream_depth, _ = decoder(seq_deter, seq_stoch, out_hw=(H, W))
-                        
-                #         # 4. Create a "HUD" (Heads-Up Display)
-                #         # We'll darken a small square in the top-left and brighten it 
-                #         # based on the reward value so you can "see" the score.
-                #         hud_overlay = torch.ones_like(dream_depth)
-                #         for t in range(IMAG_HORIZON):
-                #             # Normalize reward for display (-3 to 1.1 -> 0 to 1)
-                #             rew_norm = (seq_rewards[t] + 3.0) / 4.1
-                #             # Draw a 20x20 pixel reward indicator in the corner
-                #             hud_overlay[t, 0, :20, :20] = rew_norm
-                #             # Draw a 20x20 pixel "life" indicator (Continue Prob)
-                #             hud_overlay[t, 0, :20, 25:45] = seq_conts[t]
-                        
-                #         # Combine dream with the indicator
-                #         vis_video = torch.clamp(dream_depth + hud_overlay * 0.5, 0, 1)
-                #         writer.add_video("Visuals/Dream_with_Scores", vis_video.unsqueeze(0), global_step, fps=5)
-                
-                # # ----- NEW: Dream Visualization -----
-                # # We do this slightly less often (every 100 steps) to save GPU memory
-                # if global_step % 100 == 0:
-                #     with torch.no_grad():
-                #         # 1. Grab just the FIRST imaginary sequence in the batch to save compute
-                #         # imag["deter"] shape: [Batch, Horizon, Dim]
-                #         seq_deter = imag["deter"][0]  # [Horizon, Dim]
-                #         seq_stoch = rssm.flatten_stoch(imag["stoch"][0]) # [Horizon, C*K]
-                        
-                #         # 2. Decode the imagined states into depth maps
-                #         dream_depth, _ = decoder(seq_deter, seq_stoch, out_hw=(H, W)) # [Horizon, 1, 128, 128]
-                        
-                #         # 3. Format for TensorBoard Video: [Batch, Time, Channels, Height, Width]
-                #         # We add a Batch dimension of 1
-                #         video_tensor = dream_depth.unsqueeze(0) 
-                        
-                #         # 4. Add to TensorBoard at 5 frames per second
-                #         writer.add_video("Visuals/Dreamed_Depth", video_tensor, global_step, fps=5)
-                
+
                 if global_step % 100 == 0:
                     with torch.no_grad():
-                        # --- 1. PREPARE THE RAW DATA (First image in the batch) ---
-                        # depth_in is [B*T, 1, 128, 128], sem_ids is [B*T, 128, 128]
-                        # recon_depth is [B*T, 1, 128, 128], sem_logits is [B*T, 28, 128, 128]
-                        
-                        # --- 2. DEPTH VISUALIZATION ---
-                        t_depth = depth_in[0:1] # Ground Truth
-                        r_depth = recon_depth[0:1] # Reconstruction
-                        
-                        # Concatenate horizontally (GT | Recon)
-                        vis_depth = torch.cat([t_depth, r_depth], dim=-1) # [1, 1, 128, 320]
+                        t_depth = depth_in[0:1]
+                        r_depth = recon_depth[0:1]
+                        vis_depth = torch.cat([t_depth, r_depth], dim=-1)
                         writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
-                        
-                        # --- 3. SEMANTIC VISUALIZATION ---
-                        # Convert Logits to IDs: [1, 28, 128, 128] -> [1, 128, 128]
-                        r_sem_ids = torch.argmax(sem_logits[0:1], dim=1) 
+
+                        r_sem_ids = torch.argmax(sem_logits[0:1], dim=1)
                         t_sem_ids = sem_ids[0:1]
 
-                        # print("r_sem_ids shape:", r_sem_ids.shape)
-                        # print("t_sem_ids shape:", t_sem_ids.shape)
-                        
-                        # Normalize IDs to [0, 1] range for visualization (float)
-                        # 27 is the max class index (NUM_CLASSES - 1)
                         t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
                         r_sem_vis = r_sem_ids.float() / float(NUM_CLASSES - 1)
-                        
-                        # Add channel dimension back for add_image: [1, 128, 128]
                         t_sem_vis = t_sem_vis.unsqueeze(0)
                         r_sem_vis = r_sem_vis.unsqueeze(0)
-                        
-                        # print("Unsqueezed!")
-                        # print("r_sem_ids shape:", r_sem_vis.shape)
-                        # print("t_sem_ids shape:", t_sem_vis.shape)
-                        # print("Enter")
-                        
-                        # Concatenate horizontally (GT | Recon)
+
                         vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
                         writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
-                
-                pbar_steps.set_postfix({"rew": f"{episode_reward:.1f}", "act_L": f"{actor_loss.item():.2f}"})
 
-            if done: break
-        
-        # Episode end logging & saving
+                pbar_steps.set_postfix({
+                    "rew": f"{episode_reward:.1f}",
+                    "act_L": f"{actor_loss.item():.2f}",
+                })
+
+            if done:
+                break
+
         writer.add_scalar("Train/Episode_Reward", episode_reward, episode)
         print(f"Episode {episode} Complete | Reward: {episode_reward:.2f}")
-        
+
         if episode % 50 == 0:
             torch.save({
-                "encoder": encoder.state_dict(), "rssm": rssm.state_dict(),
-                "decoder": decoder.state_dict(), "reward_head": reward_head.state_dict(),
-                "cont_head": cont_head.state_dict(), "actor": actor.state_dict(),
-                "critic": critic.state_dict(), "target_critic": target_critic.state_dict(),
-                "wm_opt": wm_opt.state_dict(), "actor_opt": actor_opt.state_dict(),
-                "critic_opt": critic_opt.state_dict(), "global_step": global_step,
-                "episode": episode
+                "encoder": encoder.state_dict(),
+                "rssm": rssm.state_dict(),
+                "decoder": decoder.state_dict(),
+                "reward_head": reward_head.state_dict(),
+                "cont_head": cont_head.state_dict(),
+                "actor": actor.state_dict(),
+                "critic": critic.state_dict(),
+                "target_critic": target_critic.state_dict(),
+                "wm_opt": wm_opt.state_dict(),
+                "actor_opt": actor_opt.state_dict(),
+                "critic_opt": critic_opt.state_dict(),
+                "global_step": global_step,
+                "episode": episode,
             }, CKPT_PATH)
 
 if __name__ == "__main__":
