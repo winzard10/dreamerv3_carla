@@ -59,7 +59,8 @@ REWARD_SCALE = 1.0
 CONT_SCALE = 1.0
 KL_SCALE = 1.0
 ENT_SCALE = 1e-3
-PRIOR_RECON_SCALE = 0.1 # 0.25
+OVERSHOOT_K = 3
+OVERSHOOT_SCALE = 0.5
 
 # twohot support
 BINS = 255
@@ -270,7 +271,6 @@ def main():
         deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2, hidden_dim=512
     ).to(DEVICE)
 
-    # ✅ FIXED actor init (no state_dim kwarg)
     actor = Actor(
         deter_dim=DETER_DIM,
         stoch_dim=Z_DIM,
@@ -295,9 +295,6 @@ def main():
 
     # TwoHot helper (shared)
     twohot = TwoHotDist(num_bins=BINS, vmin=VMIN, vmax=VMAX, device=DEVICE).to(DEVICE)
-
-    # # Dice Score calculator
-    # dice_sc_calc = DiceScore(num_classes=NUM_CLASSES, input_format='index').to(DEVICE)
 
     # -----------------------
     # Optims
@@ -400,21 +397,17 @@ def main():
             post_depth_nll = gaussian_nll(depth_in, post_recon_depth, std=0.1).mean()
 
             # -----------------------------
-            # Prior reconstruction (auxiliary)
-            # -----------------------------
-            prior_logits_flat = prior_logits_bt.reshape(B * T, -1)
-            _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
-            prior_stoch_flat_soft = prior_probs.reshape(B * T, -1)
-
-            prior_recon_depth, prior_sem_logits = decoder(deter_flat, prior_stoch_flat_soft)
-
-            prior_sem_loss = F.cross_entropy(prior_sem_logits, sem_ids)
-            prior_depth_nll = gaussian_nll(depth_in, prior_recon_depth, std=0.1).mean()
-
-            # -----------------------------
-            # KL
+            # KL + Overshooting
             # -----------------------------
             kl_loss = rssm.kl_loss(post_logits_bt, prior_logits_bt)
+
+            overshoot_loss = rssm.overshooting_loss(
+                deter_seq=deter_seq,
+                stoch_seq=stoch_seq,
+                actions_seq=prev_actions_seq,
+                post_logits_bt=post_logits_bt,
+                k=OVERSHOOT_K,
+            )
 
             reward_logits = reward_head(deter_flat, stoch_flat_hard, goal_in)
             reward_target_symlog = symlog(prev_rewards_seq.reshape(-1))
@@ -425,12 +418,11 @@ def main():
             cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
 
             post_recon_loss = post_depth_nll + SEM_SCALE * post_sem_loss
-            prior_recon_loss = prior_depth_nll + SEM_SCALE * prior_sem_loss
 
             wm_loss = (
                 post_recon_loss
-                + PRIOR_RECON_SCALE * prior_recon_loss
                 + KL_SCALE * kl_loss
+                + OVERSHOOT_SCALE * overshoot_loss
                 + REWARD_SCALE * reward_loss
                 + CONT_SCALE * cont_loss
             )
@@ -447,14 +439,13 @@ def main():
             wm_opt.step()
 
             global_step += 1
-
+            
             if global_step % 10 == 0:
                 writer.add_scalar("Pretrain/wm_loss", wm_loss.item(), global_step)
                 writer.add_scalar("Pretrain/post_depth_nll_loss", post_depth_nll.item(), global_step)
                 writer.add_scalar("Pretrain/post_sem_loss", post_sem_loss.item(), global_step)
-                writer.add_scalar("Pretrain/prior_depth_nll_loss", prior_depth_nll.item(), global_step)
-                writer.add_scalar("Pretrain/prior_sem_loss", prior_sem_loss.item(), global_step)
                 writer.add_scalar("Pretrain/kl_loss", kl_loss.item(), global_step)
+                writer.add_scalar("Pretrain/overshoot_loss", overshoot_loss.item(), global_step)
                 writer.add_scalar("Pretrain/reward_loss", reward_loss.item(), global_step)
                 writer.add_scalar("Pretrain/cont_loss", cont_loss.item(), global_step)
 
@@ -506,7 +497,7 @@ def main():
                         start_stoch=start_stoch,
                         goal0=goal0,
                         horizon=IMAG_LOG_HORIZON,
-                        tag_prefix="PhaseA",
+                        tag_prefix="Visuals",
                         num_examples=IMAG_LOG_EXAMPLES,
                     )
 
@@ -687,22 +678,18 @@ def main():
                 post_depth_nll = gaussian_nll(depth_in, post_recon_depth, std=0.1).mean()
 
                 # -----------------------------
-                # Prior reconstruction (auxiliary)
-                # -----------------------------
-                prior_logits_flat = prior_logits_bt.reshape(B * T, -1)
-                _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
-                prior_stoch_flat_soft = prior_probs.reshape(B * T, -1)
-
-                prior_recon_depth, prior_sem_logits = decoder(deter_flat, prior_stoch_flat_soft)
-
-                prior_sem_loss = F.cross_entropy(prior_sem_logits, sem_ids)
-                prior_depth_nll = gaussian_nll(depth_in, prior_recon_depth, std=0.1).mean()
-
-                # -----------------------------
-                # KL
+                # KL + Overshooting
                 # -----------------------------
                 kl_loss = rssm.kl_loss(post_logits_bt, prior_logits_bt)
-                
+
+                overshoot_loss = rssm.overshooting_loss(
+                    deter_seq=deter_seq,
+                    stoch_seq=stoch_seq,
+                    actions_seq=prev_actions_seq,
+                    post_logits_bt=post_logits_bt,
+                    k=OVERSHOOT_K,
+                )
+
                 reward_logits = reward_head(deter_flat, stoch_flat_hard, goal_in)
                 reward_loss = twohot.ce_loss(
                     reward_logits,
@@ -714,12 +701,11 @@ def main():
                 cont_loss = F.binary_cross_entropy_with_logits(cont_logits, cont_target)
 
                 post_recon_loss = post_depth_nll + SEM_SCALE * post_sem_loss
-                prior_recon_loss = prior_depth_nll + SEM_SCALE * prior_sem_loss
 
                 wm_loss = (
                     post_recon_loss
-                    + PRIOR_RECON_SCALE * prior_recon_loss
                     + KL_SCALE * kl_loss
+                    + OVERSHOOT_SCALE * overshoot_loss
                     + REWARD_SCALE * reward_loss
                     + CONT_SCALE * cont_loss
                 )
@@ -843,11 +829,10 @@ def main():
                     writer.add_scalar("Train/depth_nll_loss", post_depth_nll.item(), global_step)
                     writer.add_scalar("Train/sem_loss", post_sem_loss.item(), global_step)
                     writer.add_scalar("Train/kl_loss", kl_loss.item(), global_step)
+                    writer.add_scalar("Train/overshoot_loss", overshoot_loss.item(), global_step)
                     writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
                     writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
-                    writer.add_scalar("Train/prior_depth_nll_loss", prior_depth_nll.item(), global_step)
-                    writer.add_scalar("Train/prior_sem_loss", prior_sem_loss.item(), global_step)
 
                 if global_step % 100 == 0:
                     with torch.no_grad():
