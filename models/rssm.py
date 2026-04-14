@@ -50,7 +50,7 @@ class RSSM(nn.Module):
         self.free_nats = float(free_nats)
 
         # GRU input: prev stochastic (flattened) + action
-        self.gru = nn.GRUCell(self.stoch_dim + self.act_dim, self.deter_dim)
+        self.gru = nn.GRUCell(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim)
 
         # Prior logits from deter
         self.prior_net = nn.Sequential(
@@ -65,26 +65,6 @@ class RSSM(nn.Module):
             nn.ELU(),
             nn.Linear(self.deter_dim, self.stoch_dim),
         )
-
-        # self.gru = nn.GRUCell(self.stoch_dim + self.act_dim, self.deter_dim)
-        
-        # hidden = self.deter_dim * 2
-
-        # self.prior_net = nn.Sequential(
-        #     nn.Linear(self.deter_dim, hidden),
-        #     nn.ELU(),
-        #     nn.Linear(hidden, hidden),
-        #     nn.ELU(),
-        #     nn.Linear(hidden, self.stoch_dim),
-        # )
-
-        # self.post_net = nn.Sequential(
-        #     nn.Linear(self.deter_dim + self.embed_dim + self.goal_dim, hidden),
-        #     nn.ELU(),
-        #     nn.Linear(hidden, hidden),
-        #     nn.ELU(),
-        #     nn.Linear(hidden, self.stoch_dim),
-        # )
 
     # ----------------------------
     # Helpers: shapes + unimix
@@ -106,9 +86,9 @@ class RSSM(nn.Module):
         probs = (1.0 - self.unimix_ratio) * probs + self.unimix_ratio * uni
         return probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
     
-    def _gru_step(self, prev_stoch_flat, action_in, deter_in):
-        x = torch.cat([prev_stoch_flat, action_in], dim=-1)   # [B, stoch_dim + act_dim]
-        return self.gru(x, deter_in)                          # [B, deter_dim]
+    def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
+        x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
+        return self.gru(x, deter_in)
 
     def dist_from_logits_flat(self, logits_flat: torch.Tensor):
         """
@@ -205,7 +185,7 @@ class RSSM(nn.Module):
         # # 5. Update GRU
         # deter = self.gru(x, deter_in)
         
-        deter = self._gru_step(prev_stoch_flat, action_in, deter_in)
+        deter = self._gru_step(prev_stoch_flat, action_in, goal_in, deter_in)
         prior_logits_flat = self.prior_net(deter) 
 
         # 6. Cat for posterior: [16, 512] + [16, 1024] + [16, 2]
@@ -216,19 +196,20 @@ class RSSM(nn.Module):
 
         return deter, post_stoch, post_logits_flat, prior_logits_flat
 
-    def img_step(self, prev_deter, prev_stoch, action, temp=0.5, relaxed=True):
+    def img_step(self, prev_deter, prev_stoch, action, goal, temp=0.5, relaxed=True):
         B = prev_deter.shape[0]
         prev_stoch_flat = self.flatten_stoch(prev_stoch).view(B, -1)
         
         # Ensure batch dimension is preserved
         deter_in = prev_deter.view(B, -1)
         action_in = action.view(B, -1)
+        goal_in = goal.view(B, -1)
 
         # x = torch.cat([prev_stoch_flat, action_in], dim=-1)
         # deter = self.gru(x, deter_in)
         
-        deter = self._gru_step(prev_stoch_flat, action_in, deter_in)
-
+        deter = self._gru_step(prev_stoch_flat, action_in, goal_in, deter_in)
+        
         prior_logits_flat = self.prior_net(deter)
         prior_logits = self._reshape_logits(prior_logits_flat)
         prior_stoch = self.straight_through_onehot_from_logits(prior_logits)
@@ -248,7 +229,7 @@ class RSSM(nn.Module):
             stoch_flat = self.flatten_stoch(stoch)
             action, logp, entropy, mean = actor(deter, stoch_flat, goal, sample=True)
 
-            deter, stoch, _ = self.img_step(deter, stoch, action)
+            deter, stoch, _ = self.img_step(deter, stoch, action, goal)
 
             actions.append(action)
             ents.append(entropy)
@@ -336,13 +317,14 @@ class RSSM(nn.Module):
         return kl.mean()
     
     def overshooting_loss(
-        self,
-        deter_seq: torch.Tensor,         # [B, T, D]
-        stoch_seq: torch.Tensor,         # [B, T, C, K]
-        actions_seq: torch.Tensor,       # [B, T, A] (same alignment as observe inputs)
-        post_logits_bt: torch.Tensor,    # [B, T, C*K]
-        k: int = 3,
-    ) -> torch.Tensor:
+            self,
+            deter_seq,
+            stoch_seq,
+            actions_seq,
+            goals_seq,
+            post_logits_bt,
+            k=3,
+        ) -> torch.Tensor:
         """
         Multi-step latent overshooting:
         Start from posterior state at time t,
@@ -366,7 +348,8 @@ class RSSM(nn.Module):
                 deter, stoch, prior_logits_flat = self.img_step(
                     deter,
                     stoch,
-                    actions_seq[:, t + j],   # future action input
+                    actions_seq[:, t + j],
+                    goals_seq[:, t + j],
                 )
 
                 target_post_logits_flat = post_logits_bt[:, t + j]
