@@ -66,26 +66,7 @@ class RSSM(nn.Module):
         #     nn.Linear(self.deter_dim, self.stoch_dim),
         # )
 
-        self.num_blocks = 8
-        assert self.deter_dim % self.num_blocks == 0
-        self.block_dim = self.deter_dim // self.num_blocks
-
-        # self.gru_in = nn.Sequential(
-        #     nn.Linear(self.stoch_dim + self.act_dim + self.deter_dim, self.deter_dim),
-        #     nn.ELU(),
-        # )
-        
-        self.gru_in = nn.Sequential(
-            nn.Linear(self.stoch_dim + self.act_dim + self.deter_dim, self.deter_dim),
-            nn.ELU(),
-            nn.Linear(self.deter_dim, self.deter_dim),
-            nn.ELU(),
-        )
-
-        self.gru_blocks = nn.ModuleList([
-            nn.GRUCell(self.block_dim, self.block_dim)
-            for _ in range(self.num_blocks)
-        ])
+        self.gru = nn.GRUCell(self.stoch_dim + self.act_dim, self.deter_dim)
         
         hidden = self.deter_dim * 2
 
@@ -126,15 +107,8 @@ class RSSM(nn.Module):
         return probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
     
     def _gru_step(self, prev_stoch_flat, action_in, deter_in):
-        mixed = self.gru_in(torch.cat([prev_stoch_flat, action_in, deter_in], dim=-1))  # [B, D]
-
-        x_blocks = torch.chunk(mixed, self.num_blocks, dim=-1)
-        h_blocks = torch.chunk(deter_in, self.num_blocks, dim=-1)
-
-        new_blocks = [
-            gru(xb, hb) for gru, xb, hb in zip(self.gru_blocks, x_blocks, h_blocks)
-        ]
-        return torch.cat(new_blocks, dim=-1)
+        x = torch.cat([prev_stoch_flat, action_in], dim=-1)   # [B, stoch_dim + act_dim]
+        return self.gru(x, deter_in)                          # [B, deter_dim]
 
     def dist_from_logits_flat(self, logits_flat: torch.Tensor):
         """
