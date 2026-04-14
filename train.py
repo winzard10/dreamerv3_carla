@@ -9,6 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 # from torchmetrics.functional.segmentation import dice_score
 
+from models import rssm
 from utils.buffer import SequenceBuffer
 from utils.lambda_returns import lambda_return
 from utils.twohot import TwoHotDist, symlog, symexp
@@ -240,6 +241,7 @@ def log_dataset_action_rollout(
     decoder,
     start_deter: torch.Tensor,      # [B, D]
     start_stoch: torch.Tensor,      # [B, C, K]
+    future_goals: torch.Tensor,     # [B, H, 2]
     future_actions: torch.Tensor,   # [B, H, A]
     horizon: int = 5,
     tag_prefix: str = "Visuals",
@@ -269,7 +271,8 @@ def log_dataset_action_rollout(
 
         for j in range(H_roll):
             action_j = future_actions[:, j]
-            deter, stoch, _ = rssm.img_step(deter, stoch, action_j)
+            goal_j = future_goals[:, j]
+            deter, stoch, _ = rssm.img_step(deter, stoch, action_j, goal_j)
             deters.append(deter)
             stochs.append(stoch)
 
@@ -311,8 +314,9 @@ def clone_batch_to_cpu(batch):
 @torch.no_grad()
 def rollout_free_prior(
     rssm,
-    actions_seq,   # [B,T,A]
-    resets=None,   # [B,T] bool or None
+    actions_seq,
+    goals_seq,
+    resets=None,
 ):
     """
     Pure free-running prior rollout over time.
@@ -335,7 +339,7 @@ def rollout_free_prior(
             deter = deter * keep + init_d * r
             stoch = stoch * keep.view(B, 1, 1) + init_s * r.view(B, 1, 1)
 
-        deter, stoch, _ = rssm.img_step(deter, stoch, actions_seq[:, t])
+        deter, stoch, _ = rssm.img_step(deter, stoch, actions_seq[:, t], goals_seq[:, t])
         prior_deters.append(deter)
         prior_stochs.append(stoch)
 
@@ -349,10 +353,11 @@ def rollout_free_prior(
 def decode_post_and_free_prior(
     rssm,
     decoder,
-    post_deter_seq,      # [B,T,D] from observe()
-    post_logits_bt,      # [B,T,C*K]
-    actions_seq,         # [B,T,A]
-    resets=None,         # [B,T] bool or None
+    post_deter_seq,
+    post_logits_bt,
+    actions_seq,
+    goals_seq,
+    resets=None,
 ):
     """
     Decode:
@@ -373,6 +378,7 @@ def decode_post_and_free_prior(
     prior_deter_seq, prior_stoch_seq = rollout_free_prior(
         rssm=rssm,
         actions_seq=actions_seq,
+        goals_seq=goals_seq,
         resets=resets,
     )
 
@@ -603,6 +609,7 @@ def main():
                 deter_seq=deter_seq,
                 stoch_seq=stoch_seq,
                 actions_seq=prev_actions_seq,
+                goals_seq=goals_seq,
                 post_logits_bt=post_logits_bt,
                 k=OVERSHOOT_K,
             )
@@ -712,8 +719,9 @@ def main():
                             post_deter_seq=v_post["deter"],
                             post_logits_bt=v_post["post_logits"],
                             actions_seq=v_prev_actions_seq,
+                            goals_seq=v_goals_seq,
                             resets=v_resets,
-                        )           
+                        )   
 
                         log_recon_panels(
                             writer=writer,
@@ -736,6 +744,7 @@ def main():
                             post_deter_seq=deter_seq,
                             post_logits_bt=post_logits_bt,
                             actions_seq=prev_actions_seq,
+                            goals_seq=goals_seq,
                             resets=resets,
                         )
 
@@ -791,6 +800,7 @@ def main():
                     start_stoch = stoch_seq[:, seed_t].detach()   # [B, C, K]
 
                     future_actions = prev_actions_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
+                    future_goals = goals_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
 
                     log_dataset_action_rollout(
                         writer=writer,
@@ -800,6 +810,7 @@ def main():
                         start_deter=start_deter,
                         start_stoch=start_stoch,
                         future_actions=future_actions,
+                        future_goals=future_goals,
                         horizon=IMAG_LOG_HORIZON,
                         tag_prefix="Visuals_A",
                         num_examples=IMAG_LOG_EXAMPLES,
@@ -992,6 +1003,7 @@ def main():
                     deter_seq=deter_seq,
                     stoch_seq=stoch_seq,
                     actions_seq=prev_actions_seq,
+                    goals_seq=goals_seq,
                     post_logits_bt=post_logits_bt,
                     k=OVERSHOOT_K,
                 )
@@ -1161,6 +1173,7 @@ def main():
                             post_deter_seq=deter_seq,
                             post_logits_bt=post_logits_bt,
                             actions_seq=prev_actions_seq,
+                            goals_seq=goals_seq,
                             resets=resets,
                         )
 
@@ -1208,6 +1221,7 @@ def main():
                                 post_deter_seq=v_post["deter"],
                                 post_logits_bt=v_post["post_logits"],
                                 actions_seq=v_prev_actions_seq,
+                                goals_seq=v_goals_seq,
                                 resets=v_resets,
                             )
 
@@ -1251,6 +1265,7 @@ def main():
                         start_stoch = stoch_seq[:, seed_t].detach()
 
                         future_actions = prev_actions_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
+                        future_goals = goals_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
 
                         log_dataset_action_rollout(
                             writer=writer,
@@ -1259,6 +1274,7 @@ def main():
                             decoder=decoder,
                             start_deter=start_deter,
                             start_stoch=start_stoch,
+                            future_goals=future_goals,
                             future_actions=future_actions,
                             horizon=IMAG_LOG_HORIZON,
                             tag_prefix="Visuals_B",
