@@ -79,6 +79,9 @@ IMAG_LOG_EVERY = 100
 IMAG_LOG_HORIZON = 10
 IMAG_LOG_EXAMPLES = 4
 
+FIXED_VAL_ENABLED = True
+LOG_ACTOR_IMAG_IN_PHASE_A = False
+
 
 def ema_update(target: torch.nn.Module, online: torch.nn.Module, tau: float):
     with torch.no_grad():
@@ -229,6 +232,192 @@ def log_imagination_rollout(
         actor.train(actor_was_training)
 
 
+@torch.no_grad()
+def log_dataset_action_rollout(
+    writer,
+    global_step: int,
+    rssm,
+    decoder,
+    start_deter: torch.Tensor,      # [B, D]
+    start_stoch: torch.Tensor,      # [B, C, K]
+    future_actions: torch.Tensor,   # [B, H, A]
+    horizon: int = 5,
+    tag_prefix: str = "Visuals",
+    num_examples: int = 4,
+):
+    """
+    Roll out the prior using REAL dataset actions, not actor actions.
+
+    Each row is:
+      seed | pred1 | pred2 | ... | predH
+    """
+    rssm_was_training = rssm.training
+    decoder_was_training = decoder.training
+
+    rssm.eval()
+    decoder.eval()
+
+    try:
+        B = start_deter.shape[0]
+        H_roll = min(horizon, future_actions.shape[1])
+
+        deter = start_deter
+        stoch = start_stoch
+
+        deters = [deter]
+        stochs = [stoch]
+
+        for j in range(H_roll):
+            action_j = future_actions[:, j]
+            deter, stoch, _ = rssm.img_step(deter, stoch, action_j)
+            deters.append(deter)
+            stochs.append(stoch)
+
+        deters = torch.stack(deters, dim=1)   # [B, H+1, D]
+        stochs = torch.stack(stochs, dim=1)   # [B, H+1, C, K]
+
+        Bh = B * (H_roll + 1)
+        deter_flat = deters.reshape(Bh, -1)
+        stoch_flat = rssm.flatten_stoch(stochs.reshape(Bh, rssm.C, rssm.K))
+
+        recon_depth, sem_logits = decoder(deter_flat, stoch_flat)
+        recon_depth = recon_depth.view(B, H_roll + 1, 1, H, W)
+        sem_pred = torch.argmax(sem_logits, dim=1).view(B, H_roll + 1, H, W)
+
+        n = min(B, num_examples)
+        depth_rows = []
+        sem_rows = []
+
+        for i in range(n):
+            depth_strip = make_strip(recon_depth[i])
+            sem_strip = make_strip(semantic_to_vis(sem_pred[i]))
+            depth_rows.append(depth_strip)
+            sem_rows.append(sem_strip)
+
+        depth_panel = torch.cat(depth_rows, dim=1)
+        sem_panel = torch.cat(sem_rows, dim=1)
+
+        writer.add_image(f"{tag_prefix}/DatasetAction_Depth", depth_panel, global_step)
+        writer.add_image(f"{tag_prefix}/DatasetAction_Semantic", sem_panel, global_step)
+
+    finally:
+        rssm.train(rssm_was_training)
+        decoder.train(decoder_was_training)
+
+def clone_batch_to_cpu(batch):
+    return tuple(x.detach().cpu().clone() for x in batch)
+
+
+@torch.no_grad()
+def rollout_free_prior(
+    rssm,
+    actions_seq,   # [B,T,A]
+    resets=None,   # [B,T] bool or None
+):
+    """
+    Pure free-running prior rollout over time.
+    This does NOT use posterior correction from observations.
+    """
+    B, T, _ = actions_seq.shape
+    device = actions_seq.device
+
+    deter, stoch = rssm.initial(B, device=device)
+
+    prior_deters = []
+    prior_stochs = []
+
+    for t in range(T):
+        if resets is not None:
+            r = resets[:, t].to(device=device).float().view(B, 1)
+            keep = 1.0 - r
+            init_d, init_s = rssm.initial(B, device=device)
+
+            deter = deter * keep + init_d * r
+            stoch = stoch * keep.view(B, 1, 1) + init_s * r.view(B, 1, 1)
+
+        deter, stoch, _ = rssm.img_step(deter, stoch, actions_seq[:, t])
+        prior_deters.append(deter)
+        prior_stochs.append(stoch)
+
+    return (
+        torch.stack(prior_deters, dim=1),   # [B,T,D]
+        torch.stack(prior_stochs, dim=1),   # [B,T,C,K]
+    )
+
+
+@torch.no_grad()
+def decode_post_and_free_prior(
+    rssm,
+    decoder,
+    post_deter_seq,      # [B,T,D] from observe()
+    post_logits_bt,      # [B,T,C*K]
+    actions_seq,         # [B,T,A]
+    resets=None,         # [B,T] bool or None
+):
+    """
+    Decode:
+      - posterior reconstruction from observe()
+      - free-running prior reconstruction from img_step rollout only
+    """
+    B, T, D = post_deter_seq.shape
+
+    # Posterior soft state decode
+    post_deter_flat = post_deter_seq.reshape(B * T, D)
+    post_logits_flat = post_logits_bt.reshape(B * T, -1)
+    _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_flat)
+    post_stoch_flat_soft = post_probs.reshape(B * T, -1)
+
+    post_recon_depth, post_sem_logits = decoder(post_deter_flat, post_stoch_flat_soft)
+
+    # Free-running prior rollout
+    prior_deter_seq, prior_stoch_seq = rollout_free_prior(
+        rssm=rssm,
+        actions_seq=actions_seq,
+        resets=resets,
+    )
+
+    prior_deter_flat = prior_deter_seq.reshape(B * T, D)
+    prior_stoch_flat = rssm.flatten_stoch(prior_stoch_seq.reshape(B * T, rssm.C, rssm.K))
+
+    prior_recon_depth, prior_sem_logits = decoder(prior_deter_flat, prior_stoch_flat)
+
+    return (
+        post_recon_depth, post_sem_logits,
+        prior_recon_depth, prior_sem_logits,
+    )
+
+
+@torch.no_grad()
+def log_recon_panels(
+    writer,
+    global_step,
+    tag_prefix,
+    depth_in,                # [B*T,1,H,W]
+    sem_ids,                 # [B*T,H,W]
+    post_recon_depth,        # [B*T,1,H,W]
+    post_sem_logits,         # [B*T,C,H,W]
+    prior_recon_depth,       # [B*T,1,H,W]
+    prior_sem_logits,        # [B*T,C,H,W]
+):
+    # Depth: GT | Post | Prior
+    t_depth = depth_in[0:1]
+    post_depth = post_recon_depth[0:1]
+    prior_depth = prior_recon_depth[0:1]
+    vis_depth = torch.cat([t_depth, post_depth, prior_depth], dim=-1)
+    writer.add_image(f"{tag_prefix}/Depth_GT_Post_Prior", vis_depth.squeeze(0), global_step)
+
+    # Semantic: GT | Post | Prior
+    t_sem_ids = sem_ids[0:1]
+    post_sem_ids = torch.argmax(post_sem_logits[0:1], dim=1)
+    prior_sem_ids = torch.argmax(prior_sem_logits[0:1], dim=1)
+
+    t_sem_vis = (t_sem_ids.float() / float(NUM_CLASSES - 1)).unsqueeze(0)
+    post_sem_vis = (post_sem_ids.float() / float(NUM_CLASSES - 1)).unsqueeze(0)
+    prior_sem_vis = (prior_sem_ids.float() / float(NUM_CLASSES - 1)).unsqueeze(0)
+
+    vis_sem = torch.cat([t_sem_vis, post_sem_vis, prior_sem_vis], dim=-1)
+    writer.add_image(f"{tag_prefix}/Semantic_GT_Post_Prior", vis_sem.squeeze(0), global_step)
+
 def main():
     print("Device:", DEVICE)
 
@@ -237,6 +426,15 @@ def main():
     # -----------------------
     buffer = SequenceBuffer(capacity=100000, seq_len=SEQ_LEN, device=DEVICE)
     buffer.load_from_disk("./data/expert_sequences")
+    
+    fixed_val_batch = None
+    if FIXED_VAL_ENABLED:
+        tmp = buffer.sample(BATCH_SIZE)
+        if tmp is not None:
+            fixed_val_batch = clone_batch_to_cpu(tmp)
+            print("[Info] Fixed validation batch captured for visual logging.")
+        else:
+            print("[Warning] Could not capture fixed validation batch.")
 
     writer = SummaryWriter(log_dir="./runs/dreamerv3_carla")
     os.makedirs(CKPT_DIR, exist_ok=True)
@@ -449,25 +647,99 @@ def main():
                 writer.add_scalar("Pretrain/reward_loss", reward_loss.item(), global_step)
                 writer.add_scalar("Pretrain/cont_loss", cont_loss.item(), global_step)
 
+            # if global_step % 100 == 0:
+            #     with torch.no_grad():
+            #         # Depth GT | Recon
+            #         t_depth = depth_in[0:1]
+            #         r_depth = post_recon_depth[0:1]
+            #         vis_depth = torch.cat([t_depth, r_depth], dim=-1)
+            #         writer.add_image("Visuals_A/Depth_Recon", vis_depth.squeeze(0), global_step)
+
+            #         # Semantic GT | Recon
+            #         r_sem_ids = torch.argmax(post_sem_logits[0:1], dim=1)
+            #         t_sem_ids = sem_ids[0:1]
+
+            #         t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
+            #         r_sem_vis = r_sem_ids.float() / float(NUM_CLASSES - 1)
+            #         t_sem_vis = t_sem_vis.unsqueeze(0)
+            #         r_sem_vis = r_sem_vis.unsqueeze(0)
+
+            #         vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
+            #         writer.add_image("Visuals_A/Semantic_Recon", vis_sem.squeeze(0), global_step)
+            
             if global_step % 100 == 0:
                 with torch.no_grad():
-                    # Depth GT | Recon
-                    t_depth = depth_in[0:1]
-                    r_depth = post_recon_depth[0:1]
-                    vis_depth = torch.cat([t_depth, r_depth], dim=-1)
-                    writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
+                    if fixed_val_batch is not None:
+                        v_depths, v_sems, v_vectors, v_goals, v_actions, v_rewards, v_dones = fixed_val_batch
+                        v_depth_in, v_sem_ids, v_vec_in, v_goal_in, v_actions_seq, v_rewards_seq, v_dones_seq, v_goals_seq = preprocess_batch(
+                            v_depths.to(DEVICE),
+                            v_sems.to(DEVICE),
+                            v_vectors.to(DEVICE),
+                            v_goals.to(DEVICE),
+                            v_actions.to(DEVICE),
+                            v_rewards.to(DEVICE),
+                            v_dones.to(DEVICE),
+                        )
 
-                    # Semantic GT | Recon
-                    r_sem_ids = torch.argmax(post_sem_logits[0:1], dim=1)
-                    t_sem_ids = sem_ids[0:1]
+                        vB, vT = v_actions_seq.shape[:2]
 
-                    t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
-                    r_sem_vis = r_sem_ids.float() / float(NUM_CLASSES - 1)
-                    t_sem_vis = t_sem_vis.unsqueeze(0)
-                    r_sem_vis = r_sem_vis.unsqueeze(0)
+                        v_embeds_flat = encoder(v_depth_in, v_sem_ids.unsqueeze(1), v_vec_in, v_goal_in)
+                        v_embeds = v_embeds_flat.view(vB, vT, -1)
 
-                    vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
-                    writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
+                        v_resets = make_resets_from_dones(v_dones_seq)
+                        v_prev_actions_seq = torch.zeros_like(v_actions_seq)
+                        v_prev_actions_seq[:, 1:] = v_actions_seq[:, :-1]
+                        v_prev_actions_seq = v_prev_actions_seq * (1.0 - v_resets.float().unsqueeze(-1))
+
+                        v_post = rssm.observe(v_embeds, v_prev_actions_seq, v_goals_seq, resets=v_resets)
+
+                        (
+                            v_post_recon_depth, v_post_sem_logits,
+                            v_prior_recon_depth, v_prior_sem_logits,
+                        ) = decode_post_and_free_prior(
+                            rssm=rssm,
+                            decoder=decoder,
+                            post_deter_seq=v_post["deter"],
+                            post_logits_bt=v_post["post_logits"],
+                            actions_seq=v_prev_actions_seq,
+                            resets=v_resets,
+                        )           
+
+                        log_recon_panels(
+                            writer=writer,
+                            global_step=global_step,
+                            tag_prefix="Visuals_A_Fixed",
+                            depth_in=v_depth_in,
+                            sem_ids=v_sem_ids,
+                            post_recon_depth=v_post_recon_depth,
+                            post_sem_logits=v_post_sem_logits,
+                            prior_recon_depth=v_prior_recon_depth,
+                            prior_sem_logits=v_prior_sem_logits,
+                        )
+                    else:
+                        (
+                            post_recon_depth_dbg, post_sem_logits_dbg,
+                            prior_recon_depth_dbg, prior_sem_logits_dbg,
+                        ) = decode_post_and_free_prior(
+                            rssm=rssm,
+                            decoder=decoder,
+                            post_deter_seq=deter_seq,
+                            post_logits_bt=post_logits_bt,
+                            actions_seq=prev_actions_seq,
+                            resets=resets,
+                        )
+
+                        log_recon_panels(
+                            writer=writer,
+                            global_step=global_step,
+                            tag_prefix="Visuals_A",
+                            depth_in=depth_in,
+                            sem_ids=sem_ids,
+                            post_recon_depth=post_recon_depth_dbg,
+                            post_sem_logits=post_sem_logits_dbg,
+                            prior_recon_depth=prior_recon_depth_dbg,
+                            prior_sem_logits=prior_sem_logits_dbg,
+                        )
             
             if global_step % 100 == 0:
                 os.makedirs(os.path.dirname(PHASE_A_PATH), exist_ok=True)
@@ -481,11 +753,11 @@ def main():
                     "global_step": global_step,
                 }, PHASE_A_PATH)
             
-            if global_step % IMAG_LOG_EVERY == 0:
+            if LOG_ACTOR_IMAG_IN_PHASE_A and global_step % IMAG_LOG_EVERY == 0:
                 with torch.no_grad():
-                    start_deter = deter_seq[:, -1].detach()   # [B, D]
-                    start_stoch = stoch_seq[:, -1].detach()   # [B, C, K]
-                    goal0 = goals_seq[:, -1].detach()         # [B, 2]
+                    start_deter = deter_seq[:, -1].detach()
+                    start_stoch = stoch_seq[:, -1].detach()
+                    goal0 = goals_seq[:, -1].detach()
 
                     log_imagination_rollout(
                         writer=writer,
@@ -497,10 +769,34 @@ def main():
                         start_stoch=start_stoch,
                         goal0=goal0,
                         horizon=IMAG_LOG_HORIZON,
-                        tag_prefix="Visuals",
+                        tag_prefix="Visuals_A",
                         num_examples=IMAG_LOG_EXAMPLES,
                     )
+            
+            if global_step % IMAG_LOG_EVERY == 0:
+                with torch.no_grad():
+                    seed_t = max(0, T - 1 - IMAG_LOG_HORIZON)
 
+                    start_deter = deter_seq[:, seed_t].detach()   # [B, D]
+                    start_stoch = stoch_seq[:, seed_t].detach()   # [B, C, K]
+
+                    future_actions = prev_actions_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
+
+                    log_dataset_action_rollout(
+                        writer=writer,
+                        global_step=global_step,
+                        rssm=rssm,
+                        decoder=decoder,
+                        start_deter=start_deter,
+                        start_stoch=start_stoch,
+                        future_actions=future_actions,
+                        horizon=IMAG_LOG_HORIZON,
+                        tag_prefix="Visuals_A",
+                        num_examples=IMAG_LOG_EXAMPLES,
+                    )
+            
+            writer.flush()
+            
             pbar.set_postfix({
                 "wm": f"{wm_loss.item():.3f}",
                 "kl": f"{kl_loss.item():.3f}",
@@ -836,21 +1132,76 @@ def main():
 
                 if global_step % 100 == 0:
                     with torch.no_grad():
-                        t_depth = depth_in[0:1]
-                        r_depth = post_recon_depth[0:1]
-                        vis_depth = torch.cat([t_depth, r_depth], dim=-1)
-                        writer.add_image("Visuals/Depth_Recon", vis_depth.squeeze(0), global_step)
+                        (
+                            post_recon_depth_dbg, post_sem_logits_dbg,
+                            prior_recon_depth_dbg, prior_sem_logits_dbg,
+                        ) = decode_post_and_free_prior(
+                            rssm=rssm,
+                            decoder=decoder,
+                            post_deter_seq=deter_seq,
+                            post_logits_bt=post_logits_bt,
+                            actions_seq=prev_actions_seq,
+                            resets=resets,
+                        )
 
-                        r_sem_ids = torch.argmax(post_sem_logits[0:1], dim=1)
-                        t_sem_ids = sem_ids[0:1]
+                        log_recon_panels(
+                            writer=writer,
+                            global_step=global_step,
+                            tag_prefix="Visuals_B",
+                            depth_in=depth_in,
+                            sem_ids=sem_ids,
+                            post_recon_depth=post_recon_depth_dbg,
+                            post_sem_logits=post_sem_logits_dbg,
+                            prior_recon_depth=prior_recon_depth_dbg,
+                            prior_sem_logits=prior_sem_logits_dbg,
+                        )
 
-                        t_sem_vis = t_sem_ids.float() / float(NUM_CLASSES - 1)
-                        r_sem_vis = r_sem_ids.float() / float(NUM_CLASSES - 1)
-                        t_sem_vis = t_sem_vis.unsqueeze(0)
-                        r_sem_vis = r_sem_vis.unsqueeze(0)
+                        if fixed_val_batch is not None:
+                            v_depths, v_sems, v_vectors, v_goals, v_actions, v_rewards, v_dones = fixed_val_batch
+                            v_depth_in, v_sem_ids, v_vec_in, v_goal_in, v_actions_seq, v_rewards_seq, v_dones_seq, v_goals_seq = preprocess_batch(
+                                v_depths.to(DEVICE),
+                                v_sems.to(DEVICE),
+                                v_vectors.to(DEVICE),
+                                v_goals.to(DEVICE),
+                                v_actions.to(DEVICE),
+                                v_rewards.to(DEVICE),
+                                v_dones.to(DEVICE),
+                            )
 
-                        vis_sem = torch.cat([t_sem_vis, r_sem_vis], dim=-1)
-                        writer.add_image("Visuals/Semantic_Recon", vis_sem.squeeze(0), global_step)
+                            vB, vT = v_actions_seq.shape[:2]
+                            v_embeds_flat = encoder(v_depth_in, v_sem_ids.unsqueeze(1), v_vec_in, v_goal_in)
+                            v_embeds = v_embeds_flat.view(vB, vT, -1)
+
+                            v_resets = make_resets_from_dones(v_dones_seq)
+                            v_prev_actions_seq = torch.zeros_like(v_actions_seq)
+                            v_prev_actions_seq[:, 1:] = v_actions_seq[:, :-1]
+                            v_prev_actions_seq = v_prev_actions_seq * (1.0 - v_resets.float().unsqueeze(-1))
+
+                            v_post = rssm.observe(v_embeds, v_prev_actions_seq, v_goals_seq, resets=v_resets)
+
+                            (
+                                v_post_recon_depth, v_post_sem_logits,
+                                v_prior_recon_depth, v_prior_sem_logits,
+                            ) = decode_post_and_free_prior(
+                                rssm=rssm,
+                                decoder=decoder,
+                                post_deter_seq=v_post["deter"],
+                                post_logits_bt=v_post["post_logits"],
+                                actions_seq=v_prev_actions_seq,
+                                resets=v_resets,
+                            )
+
+                            log_recon_panels(
+                                writer=writer,
+                                global_step=global_step,
+                                tag_prefix="Visuals_B_Fixed",
+                                depth_in=v_depth_in,
+                                sem_ids=v_sem_ids,
+                                post_recon_depth=v_post_recon_depth,
+                                post_sem_logits=v_post_sem_logits,
+                                prior_recon_depth=v_prior_recon_depth,
+                                prior_sem_logits=v_prior_sem_logits,
+                            )
                 
                 if global_step % IMAG_LOG_EVERY == 0:
                     with torch.no_grad():
@@ -868,10 +1219,32 @@ def main():
                             start_stoch=start_stoch,
                             goal0=goal0,
                             horizon=IMAG_LOG_HORIZON,
-                            tag_prefix="PhaseB",
+                            tag_prefix="Visuals_B",
                             num_examples=IMAG_LOG_EXAMPLES,
                         )
 
+                if global_step % IMAG_LOG_EVERY == 0:
+                    with torch.no_grad():
+                        seed_t = max(0, T - 1 - IMAG_LOG_HORIZON)
+
+                        start_deter = deter_seq[:, seed_t].detach()
+                        start_stoch = stoch_seq[:, seed_t].detach()
+
+                        future_actions = prev_actions_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
+
+                        log_dataset_action_rollout(
+                            writer=writer,
+                            global_step=global_step,
+                            rssm=rssm,
+                            decoder=decoder,
+                            start_deter=start_deter,
+                            start_stoch=start_stoch,
+                            future_actions=future_actions,
+                            horizon=IMAG_LOG_HORIZON,
+                            tag_prefix="Visuals_B",
+                            num_examples=IMAG_LOG_EXAMPLES,
+                        )
+                
                 pbar_steps.set_postfix({
                     "rew": f"{episode_reward:.1f}",
                     "act_L": f"{actor_loss.item():.2f}",
@@ -881,6 +1254,7 @@ def main():
                 break
 
         writer.add_scalar("Train/Episode_Reward", episode_reward, episode)
+        writer.flush()
         print(f"Episode {episode} Complete | Reward: {episode_reward:.2f}")
 
         if episode % 50 == 0:
