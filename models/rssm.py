@@ -49,8 +49,20 @@ class RSSM(nn.Module):
         self.kl_balance = float(kl_balance)
         self.free_nats = float(free_nats)
 
-        # GRU input: prev stochastic (flattened) + action
-        self.gru = nn.GRUCell(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim)
+        # # GRU input: prev stochastic (flattened) + action
+        # self.gru = nn.GRUCell(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim)
+        
+        # Pre-GRU input projection
+        self.gru_input_dim = self.stoch_dim + self.act_dim + self.goal_dim
+
+        self.pre_gru = nn.Sequential(
+            nn.Linear(self.gru_input_dim, self.deter_dim),
+            nn.ELU(),
+            nn.Linear(self.deter_dim, self.deter_dim),
+            nn.ELU(),
+        )
+
+        self.gru = nn.GRUCell(self.deter_dim, self.deter_dim)
 
         # Prior logits from deter
         self.prior_net = nn.Sequential(
@@ -87,7 +99,8 @@ class RSSM(nn.Module):
         return probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
     
     def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
-        x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
+        raw_x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
+        x = self.pre_gru(raw_x)
         return self.gru(x, deter_in)
 
     def dist_from_logits_flat(self, logits_flat: torch.Tensor):
