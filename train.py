@@ -646,6 +646,16 @@ def main():
                 writer.add_scalar("Pretrain/overshoot_loss", overshoot_loss.item(), global_step)
                 writer.add_scalar("Pretrain/reward_loss", reward_loss.item(), global_step)
                 writer.add_scalar("Pretrain/cont_loss", cont_loss.item(), global_step)
+                
+                with torch.no_grad():
+                    _, prior_probs_dbg, _ = rssm.dist_from_logits_flat(
+                        prior_logits_bt.reshape(B * T, -1)
+                    )
+                    prior_entropy = -(
+                        prior_probs_dbg * (prior_probs_dbg + 1e-8).log()
+                    ).sum(dim=-1).mean()
+
+                writer.add_scalar("Pretrain/prior_entropy", prior_entropy.item(), global_step)
 
             # if global_step % 100 == 0:
             #     with torch.no_grad():
@@ -1129,6 +1139,16 @@ def main():
                     writer.add_scalar("Train/critic_loss", critic_loss.item(), global_step)
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
                     writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
+                    
+                    with torch.no_grad():
+                        _, prior_probs_dbg, _ = rssm.dist_from_logits_flat(
+                            prior_logits_bt.reshape(B * T, -1)
+                        )
+                        prior_entropy = -(
+                            prior_probs_dbg * (prior_probs_dbg + 1e-8).log()
+                        ).sum(dim=-1).mean()
+
+                    writer.add_scalar("Train/prior_entropy", prior_entropy.item(), global_step)
 
                 if global_step % 100 == 0:
                     with torch.no_grad():
