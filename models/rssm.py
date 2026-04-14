@@ -360,3 +360,51 @@ class RSSM(nn.Module):
         # free nats (applied per timestep)
         kl = torch.clamp(kl, min=self.free_nats)
         return kl.mean()
+    
+    def overshooting_loss(
+        self,
+        deter_seq: torch.Tensor,         # [B, T, D]
+        stoch_seq: torch.Tensor,         # [B, T, C, K]
+        actions_seq: torch.Tensor,       # [B, T, A] (same alignment as observe inputs)
+        post_logits_bt: torch.Tensor,    # [B, T, C*K]
+        k: int = 3,
+    ) -> torch.Tensor:
+        """
+        Multi-step latent overshooting:
+        Start from posterior state at time t,
+        roll prior forward for j=1..k using future actions,
+        and match prior logits at t+j to posterior logits at t+j.
+        """
+        B, T, _ = deter_seq.shape
+        device = deter_seq.device
+        losses = []
+
+        max_k = min(k, T - 1)
+        if max_k <= 0:
+            return torch.zeros((), device=device)
+
+        for t in range(T - 1):
+            deter = deter_seq[:, t]      # [B, D]
+            stoch = stoch_seq[:, t]      # [B, C, K]
+
+            rollout_limit = min(max_k, T - 1 - t)
+            for j in range(1, rollout_limit + 1):
+                deter, stoch, prior_logits_flat = self.img_step(
+                    deter,
+                    stoch,
+                    actions_seq[:, t + j],   # future action input
+                )
+
+                target_post_logits_flat = post_logits_bt[:, t + j]
+
+                # Reuse balanced KL one step at a time
+                step_loss = self.kl_loss(
+                    target_post_logits_flat.unsqueeze(1),   # [B, 1, C*K]
+                    prior_logits_flat.unsqueeze(1),         # [B, 1, C*K]
+                )
+                losses.append(step_loss)
+
+        if not losses:
+            return torch.zeros((), device=device)
+
+        return torch.stack(losses).mean()
