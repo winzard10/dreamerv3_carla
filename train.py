@@ -321,6 +321,11 @@ def rollout_free_prior(
     """
     Pure free-running prior rollout over time.
     This does NOT use posterior correction from observations.
+
+    Returns:
+      prior_deter_seq:  [B, T, D]
+      prior_stoch_seq:  [B, T, C, K]   hard sampled states
+      prior_logits_seq: [B, T, C*K]    raw prior logits
     """
     B, T, _ = actions_seq.shape
     device = actions_seq.device
@@ -329,6 +334,7 @@ def rollout_free_prior(
 
     prior_deters = []
     prior_stochs = []
+    prior_logits = []
 
     for t in range(T):
         if resets is not None:
@@ -339,13 +345,17 @@ def rollout_free_prior(
             deter = deter * keep + init_d * r
             stoch = stoch * keep.view(B, 1, 1) + init_s * r.view(B, 1, 1)
 
-        deter, stoch, _ = rssm.img_step(deter, stoch, actions_seq[:, t], goals_seq[:, t])
+        deter, stoch, prior_logits_flat = rssm.img_step(
+            deter, stoch, actions_seq[:, t], goals_seq[:, t]
+        )
         prior_deters.append(deter)
         prior_stochs.append(stoch)
+        prior_logits.append(prior_logits_flat)
 
     return (
         torch.stack(prior_deters, dim=1),   # [B,T,D]
         torch.stack(prior_stochs, dim=1),   # [B,T,C,K]
+        torch.stack(prior_logits, dim=1),   # [B,T,C*K]
     )
 
 
@@ -375,7 +385,7 @@ def decode_post_and_free_prior(
     post_recon_depth, post_sem_logits = decoder(post_deter_flat, post_stoch_flat_soft)
 
     # Free-running prior rollout
-    prior_deter_seq, prior_stoch_seq = rollout_free_prior(
+    prior_deter_seq, prior_stoch_seq, prior_logits_bt = rollout_free_prior(
         rssm=rssm,
         actions_seq=actions_seq,
         goals_seq=goals_seq,
@@ -383,9 +393,12 @@ def decode_post_and_free_prior(
     )
 
     prior_deter_flat = prior_deter_seq.reshape(B * T, D)
-    prior_stoch_flat = rssm.flatten_stoch(prior_stoch_seq.reshape(B * T, rssm.C, rssm.K))
+    prior_logits_flat = prior_logits_bt.reshape(B * T, -1)
 
-    prior_recon_depth, prior_sem_logits = decoder(prior_deter_flat, prior_stoch_flat)
+    _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
+    prior_stoch_flat_soft = prior_probs.reshape(B * T, -1)
+
+    prior_recon_depth, prior_sem_logits = decoder(prior_deter_flat, prior_stoch_flat_soft)
 
     return (
         post_recon_depth, post_sem_logits,
