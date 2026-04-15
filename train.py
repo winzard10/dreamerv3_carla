@@ -785,31 +785,30 @@ def main():
                             prior_recon_depth=v_prior_recon_depth,
                             prior_sem_logits=v_prior_sem_logits,
                         )
-                    else:
-                        (
-                            post_recon_depth_dbg, post_sem_logits_dbg,
-                            prior_recon_depth_dbg, prior_sem_logits_dbg,
-                        ) = decode_post_and_free_prior(
-                            rssm=rssm,
-                            decoder=decoder,
-                            post_deter_seq=deter_seq,
-                            post_logits_bt=post_logits_bt,
-                            actions_seq=prev_actions_seq,
-                            goals_seq=goals_seq,
-                            resets=resets,
-                        )
+                    (
+                        post_recon_depth_dbg, post_sem_logits_dbg,
+                        prior_recon_depth_dbg, prior_sem_logits_dbg,
+                    ) = decode_post_and_free_prior(
+                        rssm=rssm,
+                        decoder=decoder,
+                        post_deter_seq=deter_seq,
+                        post_logits_bt=post_logits_bt,
+                        actions_seq=prev_actions_seq,
+                        goals_seq=goals_seq,
+                        resets=resets,
+                    )
 
-                        log_recon_panels(
-                            writer=writer,
-                            global_step=global_step,
-                            tag_prefix="Visuals_A",
-                            depth_in=depth_in,
-                            sem_ids=sem_ids,
-                            post_recon_depth=post_recon_depth_dbg,
-                            post_sem_logits=post_sem_logits_dbg,
-                            prior_recon_depth=prior_recon_depth_dbg,
-                            prior_sem_logits=prior_sem_logits_dbg,
-                        )
+                    log_recon_panels(
+                        writer=writer,
+                        global_step=global_step,
+                        tag_prefix="Visuals_A",
+                        depth_in=depth_in,
+                        sem_ids=sem_ids,
+                        post_recon_depth=post_recon_depth_dbg,
+                        post_sem_logits=post_sem_logits_dbg,
+                        prior_recon_depth=prior_recon_depth_dbg,
+                        prior_sem_logits=prior_sem_logits_dbg,
+                    )
             
             if global_step % 100 == 0:
                 os.makedirs(os.path.dirname(PHASE_A_PATH), exist_ok=True)
