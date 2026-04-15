@@ -52,18 +52,22 @@ class RSSM(nn.Module):
         # GRU input: prev stochastic (flattened) + action
         self.gru = nn.GRUCell(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim)
 
-        # Prior logits from deter
+        hidden = self.deter_dim * 2
+
         self.prior_net = nn.Sequential(
-            nn.Linear(self.deter_dim, self.deter_dim),
+            nn.Linear(self.deter_dim, hidden),
             nn.ELU(),
-            nn.Linear(self.deter_dim, self.stoch_dim),
+            nn.Linear(hidden, hidden),
+            nn.ELU(),
+            nn.Linear(hidden, self.stoch_dim),
         )
 
-        # Posterior logits from (deter + embed + goal)
         self.post_net = nn.Sequential(
-            nn.Linear(self.deter_dim + self.embed_dim + self.goal_dim, self.deter_dim),
+            nn.Linear(self.deter_dim + self.embed_dim + self.goal_dim, hidden),
             nn.ELU(),
-            nn.Linear(self.deter_dim, self.stoch_dim),
+            nn.Linear(hidden, hidden),
+            nn.ELU(),
+            nn.Linear(hidden, self.stoch_dim),
         )
 
     # ----------------------------
