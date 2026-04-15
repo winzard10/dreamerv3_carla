@@ -6,8 +6,9 @@ class MultiModalDecoder(nn.Module):
         super().__init__()
         in_dim = deter_dim + stoch_dim
 
-        self.fc = nn.Linear(in_dim, 256 * 8 * 8)
+        self.fc = nn.Linear(in_dim, 256 * 8 * 8)    # NOTE from John: Win, shouldn't this be 256*4*4 to match encoder's CNN output shape?
 
+        # reconstruct sem & depth image
         self.deconv = nn.Sequential(
             nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.ELU(),  # 8 -> 16
             nn.Conv2d(128, 128, 3, 1, 1), nn.ELU(),
@@ -24,16 +25,26 @@ class MultiModalDecoder(nn.Module):
         self.depth_head = nn.Conv2d(32, 1, 3, padding=1)
         self.segm_head  = nn.Conv2d(32, num_classes, 3, padding=1)
 
+        # reconstruct car vector & goal
+        self.vector_fc = nn.Linear(in_dim, 3)
+        self.goal_fc = nn.Linear(in_dim, 2)
+
 
     def forward(self, deter, stoch, out_hw=(128, 128)):
         B = deter.shape[0]
-        x = torch.cat([deter, stoch], dim=-1)
-        x = self.fc(x).view(B, 256, 8, 8)
+        x_flat = torch.cat([deter, stoch], dim=-1)
+        x = self.fc(x_flat).view(B, 256, 8, 8)
         feat = self.deconv(x)                  # [B,32,128,128]
 
         depth = torch.sigmoid(self.depth_head(feat))
         segm_logits = self.segm_head(feat)
-        return depth, segm_logits
+
+        # reconstruct vector & goal
+        # print(x_flat.shape, deter.shape, stoch.shape)        
+        vector = self.vector_fc(x_flat)
+        goal = self.goal_fc(x_flat)
+
+        return depth, segm_logits, vector, goal
 
 # import torch
 # import torch.nn as nn

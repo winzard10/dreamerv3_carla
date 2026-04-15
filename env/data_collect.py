@@ -3,8 +3,8 @@ import time
 import carla
 import numpy as np
 import torch
-from env.carla_wrapper import CarlaEnv
-# from carla_wrapper import CarlaEnv
+# from env.carla_wrapper import CarlaEnv
+from carla_wrapper import CarlaEnv
 
 
 # Configuration

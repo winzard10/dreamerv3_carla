@@ -43,7 +43,7 @@ class MultiModalEncoder(nn.Module):
         )
 
         self.fusion = nn.Sequential(
-            nn.Linear(256 * (D ** 2) + 64 + 32, embed_dim),
+            nn.Linear(256*4*4 + 64 + 32, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.ReLU(),
         )

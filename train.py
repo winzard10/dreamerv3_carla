@@ -38,7 +38,7 @@ _TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing;
 DETER_DIM = 512 *_TUNE*_TUNE
 EMBED_DIM = 1024 *_TUNE*_TUNE
 
-PHASE_A_STEPS = 20000 # 20k, 40k
+PHASE_A_STEPS = 40000 # 20k, 40k
 PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
 
 # training
@@ -48,7 +48,7 @@ CRITIC_LR = 3e-5
 
 PHASE_B_STEPS = 2000
 PART_B_EPISODE = 5000 # 5000
-TRAIN_EVERY = 5   # Update the model every 5 steps
+TRAIN_EVERY = 5   # Update the model every 5 steps  # NOTE from John: What does this mean?
 IMAG_HORIZON = 15
 GAMMA = 0.99
 LAMBDA = 0.95
@@ -69,8 +69,8 @@ VMAX = 20.0
 TARGET_EMA = 0.99
 
 # UTIL
-# CLASS_IDS = list(range(NUM_CLASSES))
-# COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
+CLASS_IDS = list(range(NUM_CLASSES))
+COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
 
 # # HARDCODED WEIGHS
 # IDX_important = torch.tensor([1,2,4,5,6,7,8,12,13,14,15,16,18,19,24], dtype=torch.long)
@@ -313,7 +313,8 @@ def main():
             deter_flat = deter_seq.reshape(B * T, -1)
             stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
-            recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
+            # reconstruct encoder inputs
+            recon_depth, sem_logits, recon_vector, recon_goal = decoder(deter_flat, stoch_flat, out_hw=(H, W))
             
             # Debug: Check tensor shapes and value ranges
             if step_A == 0:
@@ -325,20 +326,26 @@ def main():
             # Calc depth loss
             depth_loss = F.mse_loss(recon_depth, depth_in)
 
-            # # Calc semantic loss
-            # # I. Weighted CE Loss
-            # # 1a. use inverse freq of each class as weights
-            # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
-            # counts = COUNT_IDS_0.clone()
-            # counts[unique_ids] = freq_ids
-            # w_CEL = 1.0 / (counts + 1)
-            # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+            # Calc vector loss
+            vector_loss = F.mse_loss(recon_vector, vec_in)
+
+            # Calc goal loss
+            goal_loss = F.mse_loss(recon_goal, goal_in)
+
+            # Calc semantic loss
+            # I. Weighted CE Loss
+            # 1a. use inverse freq of each class as weights
+            unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+            counts = COUNT_IDS_0.clone()
+            counts[unique_ids] = freq_ids
+            w_CEL = 1.0 / (counts + 1)
+            w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
 
             # # # 1b. use hardcoded weights to mark important classes
             # # w_CEL = W_CEL
 
-            # # 2. weighted CE loss
-            # sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
+            # 2. weighted CE loss
+            sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
 
             # # convert sem_ids [B*T,H,W] from ids into onehots
             # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
@@ -354,7 +361,7 @@ def main():
             # # add dice LOSS to sem_loss
             # sem_loss += 1 - dice_sc
             
-            sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
+            # sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
 
             # Calc KL-loss
             kl_loss = rssm.kl_loss(post_logits, prior_logits)
@@ -375,6 +382,9 @@ def main():
                 + KL_SCALE * kl_loss
                 + REWARD_SCALE * reward_loss
                 + CONT_SCALE * cont_loss
+                # consider vector & goal recon loss as well
+                + vector_loss
+                + goal_loss
             )
             wm_loss.backward()
             ##### NOT IN PHASE B { #####
@@ -540,20 +550,26 @@ def main():
                 recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 
-                # # Calc semantic loss
-                # # I. Weighted CE Loss
-                # # 1a. use inverse freq of each class as weights
-                # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
-                # counts = COUNT_IDS_0.clone()
-                # counts[unique_ids] = freq_ids
-                # w_CEL = 1.0 / (counts + 1)
-                # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+                # Calc vector loss
+                vector_loss = F.mse_loss(recon_vector, vec_in)
+
+                # Calc goal loss
+                goal_loss = F.mse_loss(recon_goal, goal_in)
+
+                # Calc semantic loss
+                # I. Weighted CE Loss
+                # 1a. use inverse freq of each class as weights
+                unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+                counts = COUNT_IDS_0.clone()
+                counts[unique_ids] = freq_ids
+                w_CEL = 1.0 / (counts + 1)
+                w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
 
                 # # # 1b. use hardcoded weights to mark important classes
                 # # w_CEL = W_CEL
 
-                # # 2. weighted CE loss
-                # sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
+                # 2. weighted CE loss
+                sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
 
                 # # convert sem_ids [B*T,H,W] from ids into onehots
                 # sem_ids_oh = F.one_hot(sem_ids, num_classes=NUM_CLASSES).float()   # [B*T,H,W,C]
@@ -569,7 +585,7 @@ def main():
                 # # add dice LOSS to sem_loss
                 # sem_loss += 1.0 - dice_sc
                 
-                sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
+                # sem_loss = F.cross_entropy(sem_logits, sem_ids)     # decoder loss function: cross entropy
 
                 # Calc KL-loss
                 kl_loss = rssm.kl_loss(post["post_logits"], post["prior_logits"])
@@ -584,7 +600,10 @@ def main():
                 depth_nll = gaussian_nll(depth_in, recon_depth, std=0.1).mean()
 
                 wm_loss = (depth_nll + SEM_SCALE * sem_loss + KL_SCALE * kl_loss + 
-                           REWARD_SCALE * reward_loss + CONT_SCALE * cont_loss)
+                           REWARD_SCALE * reward_loss + CONT_SCALE * cont_loss
+                           # consider vector & goal loss as well
+                           + vector_loss + goal_loss
+                           )
                 wm_loss.backward()
 
                 ##### NOT IN PHASE A { #####
