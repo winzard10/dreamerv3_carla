@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=dreamerv3_collecttrain
+#SBATCH --job-name=dreamerv3_train
 #SBATCH --account=eecs545w26_class
 #SBATCH --partition=spgpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=180G
-#SBATCH --time=04:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
@@ -58,7 +58,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Initial buffer for CARLA to start
-sleep 30
+sleep 600
 
 # Wait for CARLA port to be ready
 echo "Waiting for CARLA on 127.0.0.1:${PORT}..."
@@ -78,7 +78,7 @@ PY
     break
   fi
   echo "Waiting for CARLA... attempt $i"
-  sleep 5
+  sleep 10
 done
 
 if [ "$READY" -ne 1 ]; then
@@ -88,12 +88,19 @@ fi
 
 cd "$REPO_DIR"
 
-if ((1)); then
-echo "=== Stage 1: Data collection ==="
-python -m env.data_collect > "$REPO_DIR/logs/collect-${SLURM_JOB_ID}.log" 2>&1
+# Running the code (data collect/train)
+
+DO_COLLECT=0
+DO_TRAIN=1
+
+if (( DO_COLLECT )); then
+  echo "=== Stage 1: Data collection ==="
+  python -m env.data_collect > "$REPO_DIR/logs/collect-${SLURM_JOB_ID}.log" 2>&1
 fi
 
-echo "=== Stage 2: Training ==="
-python -m train > "$REPO_DIR/logs/train-${SLURM_JOB_ID}.log" 2>&1
+if (( DO_TRAIN )); then
+  echo "=== Stage 2: Training ==="
+  python -m train > "$REPO_DIR/logs/train-${SLURM_JOB_ID}.log" 2>&1
+fi
 
 echo "Finished: $(date)"
