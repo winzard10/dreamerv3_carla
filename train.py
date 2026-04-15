@@ -197,19 +197,45 @@ def log_imagination_rollout(
     actor.eval()
     
     try:
-        imag = rssm.imagine(start_deter, start_stoch, actor, goal0, horizon=horizon)
+        B = start_deter.shape[0]
+        deter = start_deter
+        stoch = start_stoch
 
-        B = imag["deter"].shape[0]
+        deters = [deter]
+        logits_seq = []
+        ents = []
+        actions = []
+
+        for _ in range(horizon):
+            stoch_flat = rssm.flatten_stoch(stoch)
+            action, logp, entropy, mean = actor(deter, stoch_flat, goal0, sample=True)
+
+            deter, stoch, prior_logits_flat = rssm.img_step(deter, stoch, action, goal0)
+
+            actions.append(action)
+            ents.append(entropy)
+            deters.append(deter)
+            logits_seq.append(prior_logits_flat)
+
+        deters = torch.stack(deters, dim=1)              # [B, H+1, D]
+        prior_logits_bt = torch.stack(logits_seq, dim=1) # [B, H, C*K]
+
         n = min(B, num_examples)
 
-        # Decode imagined states (includes seed state at index 0)
         Bh = B * (horizon + 1)
-        imag_deter_flat = imag["deter"].reshape(Bh, -1)
-        imag_stoch_flat = rssm.flatten_stoch(
-            imag["stoch"].reshape(Bh, rssm.C, rssm.K)
-        )
+        imag_deter_flat = deters.reshape(Bh, -1)
 
-        recon_depth, sem_logits = decoder(imag_deter_flat, imag_stoch_flat)
+        # seed frame stays hard
+        seed_stoch_flat = rssm.flatten_stoch(start_stoch).reshape(B, -1)  # [B, C*K]
+
+        # imagined rollout frames use soft probs from prior logits
+        prior_logits_flat = prior_logits_bt.reshape(B * horizon, -1)
+        _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
+        imag_stoch_flat_soft = prior_probs.reshape(B * horizon, -1)
+
+        decode_stoch_flat = torch.cat([seed_stoch_flat, imag_stoch_flat_soft], dim=0)
+
+        recon_depth, sem_logits = decoder(imag_deter_flat, decode_stoch_flat)
         recon_depth = recon_depth.view(B, horizon + 1, 1, H, W)
         sem_pred = torch.argmax(sem_logits, dim=1).view(B, horizon + 1, H, W)
 
@@ -267,23 +293,33 @@ def log_dataset_action_rollout(
         stoch = start_stoch
 
         deters = [deter]
-        stochs = [stoch]
+        logits_seq = []
 
         for j in range(H_roll):
             action_j = future_actions[:, j]
             goal_j = future_goals[:, j]
-            deter, stoch, _ = rssm.img_step(deter, stoch, action_j, goal_j)
+            deter, stoch, prior_logits_flat = rssm.img_step(deter, stoch, action_j, goal_j)
             deters.append(deter)
-            stochs.append(stoch)
+            logits_seq.append(prior_logits_flat)
 
-        deters = torch.stack(deters, dim=1)   # [B, H+1, D]
-        stochs = torch.stack(stochs, dim=1)   # [B, H+1, C, K]
+        deters = torch.stack(deters, dim=1)              # [B, H+1, D]
+        prior_logits_bt = torch.stack(logits_seq, dim=1) # [B, H, C*K]
 
         Bh = B * (H_roll + 1)
         deter_flat = deters.reshape(Bh, -1)
-        stoch_flat = rssm.flatten_stoch(stochs.reshape(Bh, rssm.C, rssm.K))
 
-        recon_depth, sem_logits = decoder(deter_flat, stoch_flat)
+        # seed state stays hard because we only have start_stoch, not logits for it
+        seed_stoch_flat = rssm.flatten_stoch(start_stoch).reshape(B, -1)  # [B, C*K]
+
+        # rollout steps use soft probs from prior logits
+        prior_logits_flat = prior_logits_bt.reshape(B * H_roll, -1)
+        _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
+        prior_stoch_flat_soft = prior_probs.reshape(B * H_roll, -1)
+
+        # concatenate seed + rollout
+        decode_stoch_flat = torch.cat([seed_stoch_flat, prior_stoch_flat_soft], dim=0)  # [B*(H+1), C*K]
+
+        recon_depth, sem_logits = decoder(deter_flat, decode_stoch_flat)
         recon_depth = recon_depth.view(B, H_roll + 1, 1, H, W)
         sem_pred = torch.argmax(sem_logits, dim=1).view(B, H_roll + 1, H, W)
 
