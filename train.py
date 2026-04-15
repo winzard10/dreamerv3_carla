@@ -459,7 +459,7 @@ def main():
         stoch_classes=32 * _TUNE,
         unimix_ratio=0.01,
         kl_balance=0.6,
-        free_nats=1.0,
+        free_nats=0.0,
     ).to(DEVICE)
 
     Z_DIM = rssm.stoch_dim  # C*K (default 1024)
