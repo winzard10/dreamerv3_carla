@@ -53,7 +53,7 @@ class RSSM(nn.Module):
         # self.gru = nn.GRUCell(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim)
         
         # Pre-GRU input projection
-        self.gru_input_dim = self.stoch_dim + self.act_dim + self.goal_dim
+        self.gru_input_dim = self.stoch_dim + self.act_dim + self.goal_dim + self.deter_dim
 
         self.pre_gru = nn.Sequential(
             nn.Linear(self.gru_input_dim, self.deter_dim),
@@ -99,7 +99,7 @@ class RSSM(nn.Module):
         return probs / (probs.sum(dim=-1, keepdim=True) + 1e-8)
     
     def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
-        raw_x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
+        raw_x = torch.cat([prev_stoch_flat, action_in, goal_in, deter_in], dim=-1)
         x = self.pre_gru(raw_x)
         return self.gru(x, deter_in)
 
