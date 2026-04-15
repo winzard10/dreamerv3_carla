@@ -63,6 +63,12 @@ class RSSM(nn.Module):
         )
 
         self.gru = nn.GRUCell(self.deter_dim, self.deter_dim)
+        
+        self.post_gru = nn.Sequential(
+            nn.Linear(self.deter_dim, self.deter_dim),
+            nn.ELU(),
+            nn.Linear(self.deter_dim, self.deter_dim),
+        )
 
         # Prior logits from deter
         self.prior_net = nn.Sequential(
@@ -101,7 +107,11 @@ class RSSM(nn.Module):
     def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
         raw_x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
         x = self.pre_gru(raw_x)
-        return self.gru(x, deter_in)
+
+        h_raw = self.gru(x, deter_in)
+        h = h_raw + self.post_gru(h_raw)
+
+        return h
 
     def dist_from_logits_flat(self, logits_flat: torch.Tensor):
         """
