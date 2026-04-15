@@ -39,7 +39,7 @@ DETER_DIM = 512 *_TUNE*_TUNE
 EMBED_DIM = 1024 *_TUNE*_TUNE
 
 PHASE_A_STEPS = 40000 # 20k, 40k
-PHASE_A_PATH = "checkpoints/world_model/world_model_pretrained.pth"
+PHASE_A_PATH = "./checkpoints/world_model/world_model_pretrained.pth"
 
 # training
 WM_LR = 8e-5
@@ -86,7 +86,7 @@ COUNT_IDS_0 = torch.zeros(NUM_CLASSES, dtype=torch.long).to(DEVICE)
 
 
 # checkpoints
-LOAD_PRETRAINED = False
+LOAD_PRETRAINED = True
 CKPT_DIR = "checkpoints/dreamerv3"
 CKPT_PATH = os.path.join(CKPT_DIR, "dreamerv3_latest.pth")
 
@@ -547,7 +547,7 @@ def main():
                 deter_flat = deter_seq.reshape(B * T, -1)
                 stoch_flat = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
-                recon_depth, sem_logits = decoder(deter_flat, stoch_flat, out_hw=(H, W))
+                recon_depth, sem_logits, recon_vector, recon_goal = decoder(deter_flat, stoch_flat, out_hw=(H, W))
                 depth_loss = F.mse_loss(recon_depth, depth_in)
 
                 # Calc vector loss
