@@ -224,7 +224,7 @@ class CarlaEnv(gym.Env):
         
         v = self.vehicle.get_velocity()
         speed = np.sqrt(v.x**2 + v.y**2 + v.z**2)
-        vector = np.array([speed, 0, 0], dtype=np.float32) 
+        vector = np.array([speed, 0, 0], dtype=np.float32)      # NOTE from John: currently, vector just contains speed of vehicle
 
         return {
             "depth": self.last_data["depth"],

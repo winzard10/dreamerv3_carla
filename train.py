@@ -28,9 +28,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # DEVICE = torch.device("cuda")
 
 # data
-SEQ_LEN = 10 # 50
-BATCH_SIZE = 16
-NUM_CLASSES = 28   # semantic ids [0..27] (ASSUMES your semantic actually is ids)
+SEQ_LEN = 40        # max so far: 50; default: 10
+BATCH_SIZE = 4      # default: 16
+NUM_CLASSES = 28    # semantic ids [0..27] (ASSUMES your semantic actually is ids)
 H, W = 128, 128
 
 _TUNE = 1   # NOTE: int: scaling factor for latent dimensions; only for testing; set to 1 for original setup
