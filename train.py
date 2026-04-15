@@ -58,7 +58,7 @@ LAMBDA = 0.95
 SEM_SCALE = 10.0
 REWARD_SCALE = 1.0
 CONT_SCALE = 1.0
-KL_SCALE = 1.0
+KL_SCALE = 2.0 # 1.0
 ENT_SCALE = 1e-3
 OVERSHOOT_K = 3
 OVERSHOOT_SCALE = 0.5
@@ -265,10 +265,11 @@ def log_dataset_action_rollout(
     global_step: int,
     rssm,
     decoder,
-    start_deter: torch.Tensor,      # [B, D]
-    start_stoch: torch.Tensor,      # [B, C, K]
-    future_goals: torch.Tensor,     # [B, H, 2]
-    future_actions: torch.Tensor,   # [B, H, A]
+    start_deter: torch.Tensor,        # [B, D]
+    start_stoch: torch.Tensor,        # [B, C, K] used only for hard recurrence
+    start_post_logits: torch.Tensor,  # [B, C*K] used for soft seed decode
+    future_goals: torch.Tensor,       # [B, H, 2]
+    future_actions: torch.Tensor,     # [B, H, A]
     horizon: int = 5,
     tag_prefix: str = "Visuals",
     num_examples: int = 4,
@@ -308,8 +309,9 @@ def log_dataset_action_rollout(
         Bh = B * (H_roll + 1)
         deter_flat = deters.reshape(Bh, -1)
 
-        # seed state stays hard because we only have start_stoch, not logits for it
-        seed_stoch_flat = rssm.flatten_stoch(start_stoch).reshape(B, -1)  # [B, C*K]
+        # seed frame uses soft posterior probs for fair comparison
+        _, seed_probs, _ = rssm.dist_from_logits_flat(start_post_logits)   # [B, C, K]
+        seed_stoch_flat = seed_probs.reshape(B, -1)                        # [B, C*K]
 
         # rollout steps use soft probs from prior logits
         prior_logits_flat = prior_logits_bt.reshape(B * H_roll, -1)
@@ -845,8 +847,9 @@ def main():
                 with torch.no_grad():
                     seed_t = max(0, T - 1 - IMAG_LOG_HORIZON)
 
-                    start_deter = deter_seq[:, seed_t].detach()   # [B, D]
-                    start_stoch = stoch_seq[:, seed_t].detach()   # [B, C, K]
+                    start_deter = deter_seq[:, seed_t].detach()          # [B, D]
+                    start_stoch = stoch_seq[:, seed_t].detach()          # [B, C, K]
+                    start_post_logits = post_logits_bt[:, seed_t].detach()  # [B, C*K]
 
                     future_actions = prev_actions_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
                     future_goals = goals_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
@@ -858,6 +861,7 @@ def main():
                         decoder=decoder,
                         start_deter=start_deter,
                         start_stoch=start_stoch,
+                        start_post_logits=start_post_logits,
                         future_actions=future_actions,
                         future_goals=future_goals,
                         horizon=IMAG_LOG_HORIZON,
@@ -1312,6 +1316,7 @@ def main():
 
                         start_deter = deter_seq[:, seed_t].detach()
                         start_stoch = stoch_seq[:, seed_t].detach()
+                        start_post_logits = post_logits_bt[:, seed_t].detach()
 
                         future_actions = prev_actions_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
                         future_goals = goals_seq[:, seed_t + 1 : seed_t + 1 + IMAG_LOG_HORIZON].detach()
@@ -1323,6 +1328,7 @@ def main():
                             decoder=decoder,
                             start_deter=start_deter,
                             start_stoch=start_stoch,
+                            start_post_logits=start_post_logits,
                             future_goals=future_goals,
                             future_actions=future_actions,
                             horizon=IMAG_LOG_HORIZON,
