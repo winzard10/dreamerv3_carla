@@ -334,15 +334,19 @@ def main():
 
             # Calc semantic loss
             # I. Weighted CE Loss
-            # 1a. use inverse freq of each class as weights
-            unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
-            counts = COUNT_IDS_0.clone()
-            counts[unique_ids] = freq_ids
-            w_CEL = 1.0 / (counts + 1)
-            w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
 
-            # # # 1b. use hardcoded weights to mark important classes
-            # # w_CEL = W_CEL
+            # # 1a. use inverse freq of each class as weights
+            # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+            # counts = COUNT_IDS_0.clone()
+            # counts[unique_ids] = freq_ids
+            # w_CEL = 1.0 / (counts + 1)
+            # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+
+            # # 1b. use hardcoded weights to mark important classes
+            # w_CEL = W_CEL
+
+            # 1c. no weights
+            w_CEL = None
 
             # 2. weighted CE loss
             sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
@@ -408,6 +412,9 @@ def main():
                 writer.add_scalar("Pretrain/kl_loss", kl_loss.item(), global_step)
                 writer.add_scalar("Pretrain/reward_loss", reward_loss.item(), global_step)
                 writer.add_scalar("Pretrain/cont_loss", cont_loss.item(), global_step)
+                # record state & goal recon loss
+                writer.add_scalar("Pretrain/vector_loss", vector_loss.item(), global_step)
+                writer.add_scalar("Pretrain/goal_loss", goal_loss.item(), global_step)
 
             pbar.set_postfix({"wm": f"{wm_loss.item():.3f}", "kl": f"{kl_loss.item():.3f}"})
 
@@ -558,15 +565,19 @@ def main():
 
                 # Calc semantic loss
                 # I. Weighted CE Loss
-                # 1a. use inverse freq of each class as weights
-                unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
-                counts = COUNT_IDS_0.clone()
-                counts[unique_ids] = freq_ids
-                w_CEL = 1.0 / (counts + 1)
-                w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
 
-                # # # 1b. use hardcoded weights to mark important classes
-                # # w_CEL = W_CEL
+                # # 1a. use inverse freq of each class as weights
+                # unique_ids, freq_ids = torch.unique(sem_ids, return_counts=True)
+                # counts = COUNT_IDS_0.clone()
+                # counts[unique_ids] = freq_ids
+                # w_CEL = 1.0 / (counts + 1)
+                # w_CEL = w_CEL / torch.sum(w_CEL)    # normalize weights to stabilize grad
+
+                # # 1b. use hardcoded weights to mark important classes
+                # w_CEL = W_CEL
+
+                # 1c. no weights
+                w_CEL = None    
 
                 # 2. weighted CE loss
                 sem_loss = F.cross_entropy(sem_logits, sem_ids, weight=w_CEL)
@@ -739,6 +750,9 @@ def main():
                     writer.add_scalar("Train/actor_loss", actor_loss.item(), global_step)
                     writer.add_scalar("Train/imag_return_mean", returns.mean().item(), global_step)
                     # writer.add_histogram("Visuals/Imagined_Rewards", imag_reward, global_step)
+                    # record state & goal recon loss
+                    writer.add_scalar("Train/vector_loss", vector_loss.item(), global_step)
+                    writer.add_scalar("Train/goal_loss", goal_loss.item(), global_step)
                 
                 # # ----- DREAM VISUALIZATION WITH REWARD OVERLAY -----
                 # if global_step % 100 == 0:

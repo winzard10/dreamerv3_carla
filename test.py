@@ -94,7 +94,7 @@ def build_models():
 def show_reconstruction_windows(obs, deter, stoch, rssm, decoder):
     with torch.no_grad():
         stoch_flat = rssm.flatten_stoch(stoch)
-        recon_depth, recon_segm_logits = decoder(deter, stoch_flat, out_hw=(H, W))
+        recon_depth, recon_segm_logits, _,_ = decoder(deter, stoch_flat, out_hw=(H, W))
 
     # Ground truth
     gt_depth = obs["depth"][:, :, 0].astype(np.uint8)         # [H,W]

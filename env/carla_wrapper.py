@@ -79,7 +79,7 @@ class CarlaEnv(gym.Env):
             else:
                 break
         
-        # DEBUG: Visualize the route with persistent lines (for debugging)
+        # DEBUG: Visualize the route with persistent lines (for debugging)  
         # for i in range(len(self.route_waypoints) - 1):
         #     start = self.route_waypoints[i].transform.location + carla.Location(z=0.1)
         #     end = self.route_waypoints[i+1].transform.location + carla.Location(z=0.1)

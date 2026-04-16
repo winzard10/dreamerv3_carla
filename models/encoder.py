@@ -3,30 +3,32 @@ import torch.nn as nn
 
 class MultiModalEncoder(nn.Module):
     d_final = 4
+    K:int = 3
 
     def __init__(self, embed_dim=1024, num_classes=28, sem_embed_dim=16):
         super().__init__()
 
         D = self.d_final
+        K = self.K
         in_ch = 1 + sem_embed_dim
 
         self.sem_embed = nn.Embedding(num_classes, sem_embed_dim)
 
         self.cnn = nn.Sequential(
             # 128 x 128
-            nn.Conv2d(in_ch, in_ch, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(in_ch, in_ch, K, 1, 1), nn.ReLU(),
             nn.Conv2d(in_ch, 32, 4, 2, 1), nn.ReLU(),      # 128 -> 64
 
-            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(32, 32, K, 1, 1), nn.ReLU(),
             nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(),         # 64 -> 32
 
-            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(64, 64, K, 1, 1), nn.ReLU(),
             nn.Conv2d(64, 128, 4, 2, 1), nn.ReLU(),        # 32 -> 16
 
-            nn.Conv2d(128, 128, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(128, 128, K, 1, 1), nn.ReLU(),
             nn.Conv2d(128, 256, 4, 2, 1), nn.ReLU(),       # 16 -> 8
 
-            nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(256, 256, K, 1, 1), nn.ReLU(),
             nn.Conv2d(256, 256, 4, 2, 1), nn.ReLU(),       # 8 -> 4
 
             nn.Flatten(),                                  # 256 * 4 * 4 = 4096
