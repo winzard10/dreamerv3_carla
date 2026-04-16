@@ -58,10 +58,10 @@ LAMBDA = 0.95
 SEM_SCALE = 10.0
 REWARD_SCALE = 1.0
 CONT_SCALE = 1.0
-KL_SCALE = 2.0
+KL_SCALE = 1.0
 ENT_SCALE = 1e-3
 OVERSHOOT_K = 3
-OVERSHOOT_SCALE = 0.5
+OVERSHOOT_SCALE = 0.1
 
 # twohot support
 BINS = 255
@@ -225,15 +225,17 @@ def log_imagination_rollout(
         Bh = B * (horizon + 1)
         imag_deter_flat = deters.reshape(Bh, -1)
 
-        # seed frame stays hard
-        seed_stoch_flat = rssm.flatten_stoch(start_stoch).reshape(B, -1)  # [B, C*K]
+        # Interleave seed into the sequence properly
+        seed_stoch_flat = rssm.flatten_stoch(start_stoch)  # [B, C*K]
+        _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_bt.reshape(B * horizon, -1))
+        rollout_stoch_flat = prior_probs.reshape(B, horizon, -1)  # [B, H, C*K]
 
-        # imagined rollout frames use soft probs from prior logits
-        prior_logits_flat = prior_logits_bt.reshape(B * horizon, -1)
-        _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
-        imag_stoch_flat_soft = prior_probs.reshape(B * horizon, -1)
-
-        decode_stoch_flat = torch.cat([seed_stoch_flat, imag_stoch_flat_soft], dim=0)
+        # Stack seed + rollout along time dim, then flatten
+        all_stoch = torch.cat([
+            seed_stoch_flat.unsqueeze(1),   # [B, 1, C*K]
+            rollout_stoch_flat,              # [B, H, C*K]
+        ], dim=1)                            # [B, H+1, C*K]
+        decode_stoch_flat = all_stoch.reshape(B * (horizon + 1), -1)
 
         recon_depth, sem_logits = decoder(imag_deter_flat, decode_stoch_flat)
         recon_depth = recon_depth.view(B, horizon + 1, 1, H, W)
@@ -314,12 +316,15 @@ def log_dataset_action_rollout(
         seed_stoch_flat = seed_probs.reshape(B, -1)                        # [B, C*K]
 
         # rollout steps use soft probs from prior logits
-        prior_logits_flat = prior_logits_bt.reshape(B * H_roll, -1)
-        _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
-        prior_stoch_flat_soft = prior_probs.reshape(B * H_roll, -1)
+        _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_bt.reshape(B * H_roll, -1))
+        rollout_stoch_flat = prior_probs.reshape(B, H_roll, -1)            # [B, H, C*K]
 
-        # concatenate seed + rollout
-        decode_stoch_flat = torch.cat([seed_stoch_flat, prior_stoch_flat_soft], dim=0)  # [B*(H+1), C*K]
+        # interleave along time then flatten — matches deter_flat ordering
+        all_stoch = torch.cat([
+            seed_stoch_flat.unsqueeze(1),   # [B, 1, C*K]
+            rollout_stoch_flat,              # [B, H, C*K]
+        ], dim=1)                            # [B, H+1, C*K]
+        decode_stoch_flat = all_stoch.reshape(B * (H_roll + 1), -1)
 
         recon_depth, sem_logits = decoder(deter_flat, decode_stoch_flat)
         recon_depth = recon_depth.view(B, H_roll + 1, 1, H, W)
@@ -509,7 +514,7 @@ def main():
         stoch_categoricals=32 * _TUNE,
         stoch_classes=32 * _TUNE,
         unimix_ratio=0.01,
-        kl_balance=0.6,
+        kl_balance=0.8,
         free_nats=0.0,
     ).to(DEVICE)
 
@@ -713,7 +718,7 @@ def main():
                         prior_probs_dbg * (prior_probs_dbg + 1e-8).log()
                     ).sum(dim=-1).mean()
 
-                writer.add_scalar("Pretrain/prior_entropy", prior_entropy.item(), global_step)
+                    writer.add_scalar("Pretrain/prior_entropy", prior_entropy.item(), global_step)
 
             # if global_step % 100 == 0:
             #     with torch.no_grad():
@@ -1212,7 +1217,7 @@ def main():
                             prior_probs_dbg * (prior_probs_dbg + 1e-8).log()
                         ).sum(dim=-1).mean()
 
-                    writer.add_scalar("Train/prior_entropy", prior_entropy.item(), global_step)
+                        writer.add_scalar("Train/prior_entropy", prior_entropy.item(), global_step)
 
                 if global_step % 100 == 0:
                     with torch.no_grad():
