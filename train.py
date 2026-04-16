@@ -354,56 +354,168 @@ def clone_batch_to_cpu(batch):
     return tuple(x.detach().cpu().clone() for x in batch)
 
 
+# @torch.no_grad()
+# def rollout_free_prior(
+#     rssm,
+#     actions_seq,
+#     goals_seq,
+#     resets=None,
+# ):
+#     """
+#     Pure free-running prior rollout over time.
+#     This does NOT use posterior correction from observations.
+
+#     Returns:
+#       prior_deter_seq:  [B, T, D]
+#       prior_stoch_seq:  [B, T, C, K]   hard sampled states
+#       prior_logits_seq: [B, T, C*K]    raw prior logits
+#     """
+#     B, T, _ = actions_seq.shape
+#     device = actions_seq.device
+
+#     deter, stoch = rssm.initial(B, device=device)
+
+#     prior_deters = []
+#     prior_stochs = []
+#     prior_logits = []
+
+#     for t in range(T):
+#         if resets is not None:
+#             r = resets[:, t].to(device=device).float().view(B, 1)
+#             keep = 1.0 - r
+#             init_d, init_s = rssm.initial(B, device=device)
+
+#             deter = deter * keep + init_d * r
+#             stoch = stoch * keep.view(B, 1, 1) + init_s * r.view(B, 1, 1)
+
+#         deter, stoch, prior_logits_flat = rssm.img_step(
+#             deter, stoch, actions_seq[:, t], goals_seq[:, t]
+#         )
+#         prior_deters.append(deter)
+#         prior_stochs.append(stoch)
+#         prior_logits.append(prior_logits_flat)
+
+#     return (
+#         torch.stack(prior_deters, dim=1),   # [B,T,D]
+#         torch.stack(prior_stochs, dim=1),   # [B,T,C,K]
+#         torch.stack(prior_logits, dim=1),   # [B,T,C*K]
+#     )
+
+
+# @torch.no_grad()
+# def decode_post_and_free_prior(
+#     rssm,
+#     decoder,
+#     post_deter_seq,
+#     post_logits_bt,
+#     actions_seq,
+#     goals_seq,
+#     resets=None,
+# ):
+#     """
+#     Decode:
+#       - posterior reconstruction from observe()
+#       - free-running prior reconstruction from img_step rollout only
+#     """
+#     B, T, D = post_deter_seq.shape
+
+#     # Posterior soft state decode
+#     post_deter_flat = post_deter_seq.reshape(B * T, D)
+#     post_logits_flat = post_logits_bt.reshape(B * T, -1)
+#     _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_flat)
+#     post_stoch_flat_soft = post_probs.reshape(B * T, -1)
+
+#     post_recon_depth, post_sem_logits = decoder(post_deter_flat, post_stoch_flat_soft)
+
+#     # Free-running prior rollout
+#     prior_deter_seq, prior_stoch_seq, prior_logits_bt = rollout_free_prior(
+#         rssm=rssm,
+#         actions_seq=actions_seq,
+#         goals_seq=goals_seq,
+#         resets=resets,
+#     )
+
+#     prior_deter_flat = prior_deter_seq.reshape(B * T, D)
+#     prior_logits_flat = prior_logits_bt.reshape(B * T, -1)
+
+#     _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_flat)
+#     prior_stoch_flat_soft = prior_probs.reshape(B * T, -1)
+
+#     prior_recon_depth, prior_sem_logits = decoder(prior_deter_flat, prior_stoch_flat_soft)
+
+#     return (
+#         post_recon_depth, post_sem_logits,
+#         prior_recon_depth, prior_sem_logits,
+#     )
+
 @torch.no_grad()
-def rollout_free_prior(
+def rollout_seeded_prior(
     rssm,
+    post_deter_seq,
+    post_stoch_seq,
+    post_logits_bt,
     actions_seq,
     goals_seq,
     resets=None,
 ):
     """
-    Pure free-running prior rollout over time.
-    This does NOT use posterior correction from observations.
+    Posterior-seeded free prior rollout.
+
+    At the start of each episode segment (t=0 or reset[t]==1), seed the rollout
+    from the posterior state of that timestep. After that, run purely with img_step()
+    and NO posterior correction.
 
     Returns:
       prior_deter_seq:  [B, T, D]
-      prior_stoch_seq:  [B, T, C, K]   hard sampled states
-      prior_logits_seq: [B, T, C*K]    raw prior logits
+      prior_stoch_seq:  [B, T, C, K]
+      prior_logits_seq: [B, T, C*K]
     """
-    B, T, _ = actions_seq.shape
-    device = actions_seq.device
-
-    deter, stoch = rssm.initial(B, device=device)
+    B, T, D = post_deter_seq.shape
+    device = post_deter_seq.device
 
     prior_deters = []
     prior_stochs = []
     prior_logits = []
 
+    deter = None
+    stoch = None
+
     for t in range(T):
-        if resets is not None:
-            r = resets[:, t].to(device=device).float().view(B, 1)
-            keep = 1.0 - r
-            init_d, init_s = rssm.initial(B, device=device)
+        # Seed at start of sequence or at resets
+        if t == 0:
+            deter = post_deter_seq[:, t]
+            stoch = post_stoch_seq[:, t]
 
-            deter = deter * keep + init_d * r
-            stoch = stoch * keep.view(B, 1, 1) + init_s * r.view(B, 1, 1)
+        elif resets is not None:
+            r = resets[:, t].to(device=device).bool()
+            if r.any():
+                seeded_deter = post_deter_seq[:, t]
+                seeded_stoch = post_stoch_seq[:, t]
 
-        deter, stoch, prior_logits_flat = rssm.img_step(
-            deter, stoch, actions_seq[:, t], goals_seq[:, t]
-        )
+                deter = torch.where(r.unsqueeze(-1), seeded_deter, deter)
+                stoch = torch.where(r.view(B, 1, 1), seeded_stoch, stoch)
+
+        # Prior corresponding to current deter
+        prior_logits_t = rssm.prior_net(deter)
+
         prior_deters.append(deter)
         prior_stochs.append(stoch)
-        prior_logits.append(prior_logits_flat)
+        prior_logits.append(prior_logits_t)
+
+        # Step forward for next timestep
+        if t < T - 1:
+            deter, stoch, _ = rssm.img_step(
+                deter, stoch, actions_seq[:, t + 1], goals_seq[:, t + 1]
+            )
 
     return (
         torch.stack(prior_deters, dim=1),   # [B,T,D]
         torch.stack(prior_stochs, dim=1),   # [B,T,C,K]
         torch.stack(prior_logits, dim=1),   # [B,T,C*K]
     )
-
-
+    
 @torch.no_grad()
-def decode_post_and_free_prior(
+def decode_post_and_seeded_prior(
     rssm,
     decoder,
     post_deter_seq,
@@ -415,7 +527,7 @@ def decode_post_and_free_prior(
     """
     Decode:
       - posterior reconstruction from observe()
-      - free-running prior reconstruction from img_step rollout only
+      - posterior-seeded free prior reconstruction
     """
     B, T, D = post_deter_seq.shape
 
@@ -427,9 +539,11 @@ def decode_post_and_free_prior(
 
     post_recon_depth, post_sem_logits = decoder(post_deter_flat, post_stoch_flat_soft)
 
-    # Free-running prior rollout
-    prior_deter_seq, prior_stoch_seq, prior_logits_bt = rollout_free_prior(
+    # Posterior-seeded free prior rollout
+    prior_deter_seq, prior_stoch_seq, prior_logits_bt = rollout_seeded_prior(
         rssm=rssm,
+        post_deter_seq=post_deter_seq,
+        post_logits_bt=post_logits_bt,
         actions_seq=actions_seq,
         goals_seq=goals_seq,
         resets=resets,
@@ -769,7 +883,7 @@ def main():
                         (
                             v_post_recon_depth, v_post_sem_logits,
                             v_prior_recon_depth, v_prior_sem_logits,
-                        ) = decode_post_and_free_prior(
+                        ) = decode_post_and_seeded_prior(
                             rssm=rssm,
                             decoder=decoder,
                             post_deter_seq=v_post["deter"],
@@ -793,7 +907,7 @@ def main():
                     (
                         post_recon_depth_dbg, post_sem_logits_dbg,
                         prior_recon_depth_dbg, prior_sem_logits_dbg,
-                    ) = decode_post_and_free_prior(
+                    ) = decode_post_and_seeded_prior(
                         rssm=rssm,
                         decoder=decoder,
                         post_deter_seq=deter_seq,
@@ -1224,7 +1338,7 @@ def main():
                         (
                             post_recon_depth_dbg, post_sem_logits_dbg,
                             prior_recon_depth_dbg, prior_sem_logits_dbg,
-                        ) = decode_post_and_free_prior(
+                        ) = decode_post_and_seeded_prior(
                             rssm=rssm,
                             decoder=decoder,
                             post_deter_seq=deter_seq,
@@ -1272,7 +1386,7 @@ def main():
                             (
                                 v_post_recon_depth, v_post_sem_logits,
                                 v_prior_recon_depth, v_prior_sem_logits,
-                            ) = decode_post_and_free_prior(
+                            ) = decode_post_and_seeded_prior(
                                 rssm=rssm,
                                 decoder=decoder,
                                 post_deter_seq=v_post["deter"],
