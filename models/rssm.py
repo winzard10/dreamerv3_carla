@@ -54,11 +54,21 @@ class RSSM(nn.Module):
 
         hidden = self.deter_dim * 2
 
+        # self.prior_net = nn.Sequential(
+        #     nn.Linear(self.deter_dim, hidden),
+        #     nn.ELU(),
+        #     nn.Linear(hidden, hidden),
+        #     nn.ELU(),
+        #     nn.Linear(hidden, self.stoch_dim),
+        # )
+        
         self.prior_net = nn.Sequential(
             nn.Linear(self.deter_dim, hidden),
-            nn.ELU(),
+            nn.SiLU(),
             nn.Linear(hidden, hidden),
-            nn.ELU(),
+            nn.SiLU(),
+            nn.Linear(hidden, hidden),
+            nn.SiLU(),
             nn.Linear(hidden, self.stoch_dim),
         )
 
