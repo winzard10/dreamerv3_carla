@@ -61,7 +61,7 @@ CONT_SCALE = 1.0
 KL_SCALE = 1.0
 ENT_SCALE = 1e-3
 OVERSHOOT_K = 3
-OVERSHOOT_SCALE = 0.1
+OVERSHOOT_SCALE = 0.5
 
 # twohot support
 BINS = 255
@@ -1490,6 +1490,25 @@ def main():
                 "global_step": global_step,
                 "episode": episode,
             }, CKPT_PATH)
+        
+        if episode % 50 == 0:
+            ckpt_path = os.path.join(CKPT_DIR, f"dreamerv3_ep{episode}.pth")
+
+            torch.save({
+                "encoder": encoder.state_dict(),
+                "rssm": rssm.state_dict(),
+                "decoder": decoder.state_dict(),
+                "reward_head": reward_head.state_dict(),
+                "cont_head": cont_head.state_dict(),
+                "actor": actor.state_dict(),
+                "critic": critic.state_dict(),
+                "target_critic": target_critic.state_dict(),
+                "wm_opt": wm_opt.state_dict(),
+                "actor_opt": actor_opt.state_dict(),
+                "critic_opt": critic_opt.state_dict(),
+                "global_step": global_step,
+                "episode": episode,
+            }, ckpt_path)
 
 if __name__ == "__main__":
     main()
