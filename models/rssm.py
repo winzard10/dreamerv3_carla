@@ -36,14 +36,7 @@ class RSSM(nn.Module):
         self.kl_balance = float(kl_balance)
         self.free_nats = float(free_nats)
 
-        self.pre_gru = nn.Sequential(
-            nn.Linear(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim),
-            nn.ELU(),
-            nn.Linear(self.deter_dim, self.deter_dim),
-            nn.ELU(),
-        )
-
-        self.gru = nn.GRUCell(self.deter_dim, self.deter_dim)
+        self.gru = nn.GRUCell(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim)
 
         hidden = self.deter_dim * 2
 
@@ -102,7 +95,6 @@ class RSSM(nn.Module):
 
     def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
         x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
-        x = self.pre_gru(x)
         return self.gru(x, deter_in)
     
     def initial(self, batch_size: int, device=None):
