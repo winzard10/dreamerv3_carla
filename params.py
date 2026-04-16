@@ -4,7 +4,6 @@ import torch
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Data
-SEQ_LEN     = 10
 BATCH_SIZE  = 4
 NUM_CLASSES = 28
 H, W        = 128, 128
@@ -36,10 +35,10 @@ CRITIC_LR = 3e-5
 SEM_SCALE       = 10.0
 REWARD_SCALE    = 1.0
 CONT_SCALE      = 1.0
-KL_SCALE        = 2.0   # NOTE: keep >= 2.0 — 1.0 starves the prior of gradient
+KL_SCALE        = 1.0   # NOTE: keep >= 2.0 — 1.0 starves the prior of gradient
 ENT_SCALE       = 1e-3
 OVERSHOOT_K     = 3
-OVERSHOOT_SCALE = 0.5
+OVERSHOOT_SCALE = 0.1
 
 # TwoHot reward distribution
 BINS = 255
@@ -69,3 +68,15 @@ TEST_NUM_EPISODES  = 5
 SHOW_RECON         = True
 SHOW_SPECTATOR     = True
 SHOW_EVERY_N_STEPS = 3
+
+
+# =============================================================================
+# Data Collection
+# =============================================================================
+SEQ_LEN              = 10    # increase when collecting new data for better prior
+COLLECT_SAVE_DIR     = "./data/expert_sequences"
+COLLECT_TARGET_STEPS = 50000
+COLLECT_LOOKAHEAD    = 2     # waypoints ahead for expert steering
+COLLECT_STEER_GAIN   = 0.85
+COLLECT_THROTTLE     = 0.4  # maps to 40% throttle in CarlaEnv wrapper
+COLLECT_LOG_EVERY    = 100
