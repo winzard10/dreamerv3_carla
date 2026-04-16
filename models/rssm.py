@@ -99,10 +99,10 @@ class RSSM(nn.Module):
         idx = D.Categorical(probs=probs).sample()
         onehot = F.one_hot(idx, self.K).to(probs.dtype)
         return onehot + probs - probs.detach()
-    
+
     def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
         x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
-        x = self.pre_gru(x)  # [B, deter_dim]
+        x = self.pre_gru(x)
         return self.gru(x, deter_in)
     
     def initial(self, batch_size: int, device=None):
