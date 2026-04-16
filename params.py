@@ -1,0 +1,71 @@
+# params.py
+import torch
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Data
+SEQ_LEN     = 10
+BATCH_SIZE  = 4
+NUM_CLASSES = 28
+H, W        = 128, 128
+
+# Model dimensions — must match between train and test
+DETER_DIM         = 512
+EMBED_DIM         = 1024
+STOCH_CATEGORICALS = 32
+STOCH_CLASSES      = 32
+
+# Phase A
+PHASE_A_STEPS = 20000
+PHASE_A_PATH  = "checkpoints/world_model/world_model_pretrained.pth"
+
+# Phase B
+PHASE_B_STEPS  = 2000
+PART_B_EPISODE = 5000
+TRAIN_EVERY    = 5
+IMAG_HORIZON   = 15
+GAMMA          = 0.99
+LAMBDA         = 0.95
+
+# Learning rates
+WM_LR     = 8e-5
+ACTOR_LR  = 3e-5
+CRITIC_LR = 3e-5
+
+# Loss scales
+SEM_SCALE       = 10.0
+REWARD_SCALE    = 1.0
+CONT_SCALE      = 1.0
+KL_SCALE        = 2.0   # NOTE: keep >= 2.0 — 1.0 starves the prior of gradient
+ENT_SCALE       = 1e-3
+OVERSHOOT_K     = 3
+OVERSHOOT_SCALE = 0.5
+
+# TwoHot reward distribution
+BINS = 255
+VMIN = -20.0
+VMAX =  20.0
+
+# EMA for target critic
+TARGET_EMA = 0.99
+
+# Checkpoints
+LOAD_PRETRAINED = False
+CKPT_DIR        = "checkpoints/dreamerv3"
+CKPT_PATH       = "checkpoints/dreamerv3/dreamerv3_latest.pth"
+
+# Logging
+IMAG_LOG_EVERY            = 100
+IMAG_LOG_HORIZON          = 10
+IMAG_LOG_EXAMPLES         = 4
+FIXED_VAL_ENABLED         = True
+LOG_ACTOR_IMAG_IN_PHASE_A = False
+
+# =============================================================================
+# Evaluation / Test
+# =============================================================================
+TEST_TOWN          = "Town10HD"
+TEST_NUM_EPISODES  = 5
+SHOW_RECON         = True
+SHOW_SPECTATOR     = True
+SHOW_EVERY_N_STEPS = 3
