@@ -451,19 +451,27 @@ def clone_batch_to_cpu(batch):
 @torch.no_grad()
 def rollout_seeded_prior(
     rssm,
-    post_deter_seq,
-    post_stoch_seq,
-    post_logits_bt,
-    actions_seq,
-    goals_seq,
-    resets=None,
+    post_deter_seq,   # [B, T, D]
+    post_stoch_seq,   # [B, T, C, K]
+    actions_seq,      # [B, T, A]  — prev_actions_seq convention (shifted)
+    goals_seq,        # [B, T, 2]
+    resets=None,      # [B, T] bool or None
 ):
     """
     Posterior-seeded free prior rollout.
 
-    At the start of each episode segment (t=0 or reset[t]==1), seed the rollout
-    from the posterior state of that timestep. After that, run purely with img_step()
-    and NO posterior correction.
+    At t=0 (and at any reset), seeds deter/stoch from the posterior.
+    For all subsequent steps, rolls forward purely with img_step — no
+    posterior correction.
+
+    The prior prediction for timestep t is produced by stepping from the
+    state at t-1, so it represents what the model predicted BEFORE seeing
+    the observation at t. This aligns with how prior_logits are produced
+    inside observe().
+
+    t=0 has no prior prediction in the strict sense (nothing preceded it),
+    so we use prior_net(post_deter_t0) as a stand-in — it will look similar
+    to the posterior at that frame, which is expected.
 
     Returns:
       prior_deter_seq:  [B, T, D]
@@ -477,41 +485,36 @@ def rollout_seeded_prior(
     prior_stochs = []
     prior_logits = []
 
-    deter = None
-    stoch = None
+    # Seed from posterior at t=0
+    deter = post_deter_seq[:, 0]
+    stoch = post_stoch_seq[:, 0]
 
-    for t in range(T):
-        # Seed at start of sequence or at resets
-        if t == 0:
-            deter = post_deter_seq[:, t]
-            stoch = post_stoch_seq[:, t]
+    # t=0: no prior step preceded this — use posterior deter as stand-in
+    prior_deters.append(deter)
+    prior_stochs.append(stoch)
+    prior_logits.append(rssm.prior_net(deter))
 
-        elif resets is not None:
+    for t in range(1, T):
+        # Re-seed from posterior at episode resets
+        if resets is not None:
             r = resets[:, t].to(device=device).bool()
             if r.any():
-                seeded_deter = post_deter_seq[:, t]
-                seeded_stoch = post_stoch_seq[:, t]
+                deter = torch.where(r.unsqueeze(-1), post_deter_seq[:, t], deter)
+                stoch = torch.where(r.view(B, 1, 1), post_stoch_seq[:, t], stoch)
 
-                deter = torch.where(r.unsqueeze(-1), seeded_deter, deter)
-                stoch = torch.where(r.view(B, 1, 1), seeded_stoch, stoch)
-
-        # Prior corresponding to current deter
-        prior_logits_t = rssm.prior_net(deter)
+        # Prior step: state at t-1 + action at t → prior prediction for t
+        deter, stoch, prior_logits_t = rssm.img_step(
+            deter, stoch, actions_seq[:, t], goals_seq[:, t]
+        )
 
         prior_deters.append(deter)
         prior_stochs.append(stoch)
         prior_logits.append(prior_logits_t)
 
-        # Step forward for next timestep
-        if t < T - 1:
-            deter, stoch, _ = rssm.img_step(
-                deter, stoch, actions_seq[:, t + 1], goals_seq[:, t + 1]
-            )
-
     return (
-        torch.stack(prior_deters, dim=1),   # [B,T,D]
-        torch.stack(prior_stochs, dim=1),   # [B,T,C,K]
-        torch.stack(prior_logits, dim=1),   # [B,T,C*K]
+        torch.stack(prior_deters, dim=1),   # [B, T, D]
+        torch.stack(prior_stochs, dim=1),   # [B, T, C, K]
+        torch.stack(prior_logits, dim=1),   # [B, T, C*K]
     )
     
 @torch.no_grad()
@@ -519,6 +522,7 @@ def decode_post_and_seeded_prior(
     rssm,
     decoder,
     post_deter_seq,
+    post_stoch_seq,
     post_logits_bt,
     actions_seq,
     goals_seq,
@@ -543,7 +547,7 @@ def decode_post_and_seeded_prior(
     prior_deter_seq, prior_stoch_seq, prior_logits_bt = rollout_seeded_prior(
         rssm=rssm,
         post_deter_seq=post_deter_seq,
-        post_logits_bt=post_logits_bt,
+        post_stoch_seq=post_stoch_seq,
         actions_seq=actions_seq,
         goals_seq=goals_seq,
         resets=resets,
@@ -887,6 +891,7 @@ def main():
                             rssm=rssm,
                             decoder=decoder,
                             post_deter_seq=v_post["deter"],
+                            post_stoch_seq=v_post["stoch"],
                             post_logits_bt=v_post["post_logits"],
                             actions_seq=v_prev_actions_seq,
                             goals_seq=v_goals_seq,
@@ -911,6 +916,7 @@ def main():
                         rssm=rssm,
                         decoder=decoder,
                         post_deter_seq=deter_seq,
+                        post_stoch_seq=stoch_seq,
                         post_logits_bt=post_logits_bt,
                         actions_seq=prev_actions_seq,
                         goals_seq=goals_seq,
@@ -1342,6 +1348,7 @@ def main():
                             rssm=rssm,
                             decoder=decoder,
                             post_deter_seq=deter_seq,
+                            post_stoch_seq=stoch_seq,
                             post_logits_bt=post_logits_bt,
                             actions_seq=prev_actions_seq,
                             goals_seq=goals_seq,
@@ -1390,6 +1397,7 @@ def main():
                                 rssm=rssm,
                                 decoder=decoder,
                                 post_deter_seq=v_post["deter"],
+                                post_stoch_seq=v_post["stoch"],
                                 post_logits_bt=v_post["post_logits"],
                                 actions_seq=v_prev_actions_seq,
                                 goals_seq=v_goals_seq,
