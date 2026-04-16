@@ -36,6 +36,10 @@ class RSSM(nn.Module):
         self.kl_balance = float(kl_balance)
         self.free_nats = float(free_nats)
 
+        self.num_blocks = 8
+        assert self.deter_dim % self.num_blocks == 0
+        self.block_dim = self.deter_dim // self.num_blocks
+
         self.pre_gru = nn.Sequential(
             nn.Linear(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim),
             nn.ELU(),
@@ -43,7 +47,10 @@ class RSSM(nn.Module):
             nn.ELU(),
         )
 
-        self.gru = nn.GRUCell(self.deter_dim, self.deter_dim)
+        self.gru_blocks = nn.ModuleList([
+            nn.GRUCell(self.block_dim, self.block_dim)
+            for _ in range(self.num_blocks)
+        ])
 
         hidden = self.deter_dim * 2
 
@@ -54,6 +61,16 @@ class RSSM(nn.Module):
             nn.ELU(),
             nn.Linear(hidden, self.stoch_dim),
         )
+        
+        # self.prior_net = nn.Sequential(
+        #     nn.Linear(self.deter_dim, hidden),
+        #     nn.SiLU(),
+        #     nn.Linear(hidden, hidden),
+        #     nn.SiLU(),
+        #     nn.Linear(hidden, hidden),
+        #     nn.SiLU(),
+        #     nn.Linear(hidden, self.stoch_dim),
+        # )
 
         self.post_net = nn.Sequential(
             nn.Linear(self.deter_dim + self.embed_dim + self.goal_dim, hidden),
@@ -99,11 +116,25 @@ class RSSM(nn.Module):
         idx = D.Categorical(probs=probs).sample()
         onehot = F.one_hot(idx, self.K).to(probs.dtype)
         return onehot + probs - probs.detach()
+
+    # def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
+    #     x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
+    #     x = self.pre_gru(x)
+    #     return self.gru(x, deter_in)
     
     def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
         x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
         x = self.pre_gru(x)  # [B, deter_dim]
-        return self.gru(x, deter_in)
+
+        x_blocks = torch.chunk(x, self.num_blocks, dim=-1)
+        h_blocks = torch.chunk(deter_in, self.num_blocks, dim=-1)
+
+        next_blocks = [
+            gru(xb, hb)
+            for gru, xb, hb in zip(self.gru_blocks, x_blocks, h_blocks)
+        ]
+
+        return torch.cat(next_blocks, dim=-1)
     
     def initial(self, batch_size: int, device=None):
         device = device or next(self.parameters()).device
