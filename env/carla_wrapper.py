@@ -148,13 +148,13 @@ class CarlaEnv(gym.Env):
         vehicle_loc = self.vehicle.get_location()
         
         # DEBUG: Draw a red "X" at the target waypoint for debugging
-        # self.world.debug.draw_string(
-        #     target_loc + carla.Location(z=1.0), 
-        #     "X", 
-        #     draw_shadow=False,
-        #     color=carla.Color(255, 0, 0), 
-        #     life_time=0.1
-        # )
+        self.world.debug.draw_string(
+            target_loc + carla.Location(z=1.0), 
+            "X", 
+            draw_shadow=False,
+            color=carla.Color(255, 0, 0), 
+            life_time=0.1
+        )
         
         # Distance check
         dist = vehicle_loc.distance(target_loc)
@@ -287,15 +287,63 @@ class CarlaEnv(gym.Env):
         r_stall = -10.0 if self.stuck_ticks >= 100 else 0.0 
         r_idle = -0.05 if speed_kmh < 1.0 else 0.0
         r_offroad = -10.0 if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0 
+        
+        # Action inconsistency penalty (Normalized + Deadband + Clamp)
+        r_smooth = 0.0
+        w_smooth = 0.20  # Global scaling factor for how much smoothness matters
 
+        if self.prev_action is not None:
+            cur_action = np.array(action, dtype=np.float32)
+
+            # Normalization
+            if hasattr(self, 'action_space') and hasattr(self.action_space, 'low'):
+                a_low = np.array(self.action_space.low, dtype=np.float32)
+                a_high = np.array(self.action_space.high, dtype=np.float32)
+            else:
+                # Fallback assuming [-1, 1] bounds for steer and throttle/brake
+                a_low = np.array([-1.0, -1.0], dtype=np.float32)
+                a_high = np.array([1.0, 1.0], dtype=np.float32)
+
+            a_range = np.maximum(a_high - a_low, 1e-6)
+
+            # Calculate normalized delta
+            da = cur_action - self.prev_action
+            d_norm = da / a_range
+
+            # Deadband: ignore tiny noisy changes (< 2% of range)
+            eps = 0.02
+            d_deadband = np.maximum(np.abs(d_norm) - eps, 0.0)
+
+            # Weighted squared difference
+            # Steer changes are penalized more heavily than throttle/brake
+            steer_penalty = 0.70 * (d_deadband[0] ** 2)
+            throttle_brake_penalty = 0.30 * (d_deadband[1] ** 2)
+            raw_penalty = steer_penalty + throttle_brake_penalty
+
+            # Clamp: Bound the maximum penalty to 1.0 before applying the global weight
+            r_smooth = -w_smooth * min(float(raw_penalty), 1.0)
+
+        self.prev_action = np.array(action, dtype=np.float32)
+
+        # Calculate total reward
+        total_reward = (
+            (r_speed * r_center * r_angle)
+            + r_collision + r_stall + r_offroad + r_idle
+            + self.waypoint_reward
+            + r_smooth
+        )
+
+        return total_reward
+        
+        '''
         # Action inconsistency penalty
         r_smooth = 0.0
         if self.prev_action is not None:
             da= np.array(action, dtype=np.float32) - self.prev_action
             # weighted squared difference
             r_smooth = -(
-                0.08 * (da[0] ** 2) + # steer change penalty (can be tuned)
-                0.03 * (da[1] ** 2)   # throttle/break change penalty (can be tuned)
+                0.15 * (da[0] ** 2) + # steer change penalty (can be tuned)
+                0.05 * (da[1] ** 2)   # throttle/break change penalty (can be tuned)
             )
 
         self.prev_action = np.array(action, dtype=np.float32)
@@ -311,7 +359,7 @@ class CarlaEnv(gym.Env):
         # total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
 
         return total_reward
-
+        '''
     def _check_done(self):
         if self.current_waypoint_index >= len(self.route_waypoints) - 10:
             return True
