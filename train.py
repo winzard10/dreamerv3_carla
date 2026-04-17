@@ -60,8 +60,8 @@ def main():
     Z_DIM   = rssm.stoch_dim
     decoder = MultiModalDecoder(deter_dim=DETER_DIM, stoch_dim=Z_DIM, num_classes=NUM_CLASSES).to(DEVICE)
 
-    reward_head   = RewardHead(deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2,
-                                hidden_dim=512, bins=BINS, vmin=VMIN, vmax=VMAX).to(DEVICE)
+    reward_head = RewardHead(deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2,
+                          hidden_dim=512, bins=BINS).to(DEVICE)
     cont_head     = ContinueHead(deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2, hidden_dim=512).to(DEVICE)
     actor         = Actor(deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2, action_dim=2,
                           hidden_dim=512, min_std=0.1, init_std=1.0).to(DEVICE)
@@ -100,15 +100,8 @@ def main():
     else:
         for m in [encoder, rssm, decoder, reward_head, cont_head]:
             m.train()
-
-        # Pre-compute fixed validation rssm_out once — reused every log step
+        
         fixed_rssm_out = None
-        if fixed_val_batch is not None:
-            with torch.no_grad():
-                fixed_rssm_out = compute_rssm_out(
-                    [x.to(DEVICE) for x in fixed_val_batch], encoder, rssm
-                )
-
         pbar = tqdm(range(PHASE_A_STEPS), desc="[Phase A] WM pretrain")
         for _ in pbar:
             batch = buffer.sample(BATCH_SIZE)
@@ -126,6 +119,10 @@ def main():
 
             if global_step % 100 == 0:
                 with torch.no_grad():
+                    if fixed_val_batch is not None:
+                        fixed_rssm_out = compute_rssm_out(
+                            [x.to(DEVICE) for x in fixed_val_batch], encoder, rssm
+                        )
                     log_visuals(writer, global_step, rssm_out, rssm, decoder,
                                 "Visuals_A", fixed_rssm_out)
                 save_checkpoint(
@@ -168,15 +165,7 @@ def main():
     env       = CarlaEnv()
     spectator = env.world.get_spectator()
 
-    # Pre-compute fixed validation rssm_out for Phase B logging
-    # NOTE: re-computed here since encoder/rssm weights may have changed
     fixed_rssm_out_B = None
-    if fixed_val_batch is not None:
-        with torch.no_grad():
-            fixed_rssm_out_B = compute_rssm_out(
-                [x.to(DEVICE) for x in fixed_val_batch], encoder, rssm
-            )
-
     for episode in range(ckpt.get("episode", 0) + 1, PART_B_EPISODE + 1):
         obs, _         = env.reset()
         episode_reward = 0.0
@@ -241,6 +230,10 @@ def main():
 
                 if global_step % 100 == 0:
                     with torch.no_grad():
+                        if fixed_val_batch is not None:
+                            fixed_rssm_out_B = compute_rssm_out(
+                                [x.to(DEVICE) for x in fixed_val_batch], encoder, rssm
+                            )
                         log_visuals(writer, global_step, rssm_out, rssm, decoder,
                                     "Visuals_B", fixed_rssm_out_B)
 
