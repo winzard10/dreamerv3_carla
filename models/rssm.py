@@ -97,6 +97,20 @@ class RSSM(nn.Module):
         x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
         return self.gru(x, deter_in)
     
+    # def _gru_step(self, prev_stoch_flat, action_in, goal_in, deter_in):
+    #     x = torch.cat([prev_stoch_flat, action_in, goal_in], dim=-1)
+    #     x = self.pre_gru(x)  # [B, deter_dim]
+
+    #     x_blocks = torch.chunk(x, self.num_blocks, dim=-1)
+    #     h_blocks = torch.chunk(deter_in, self.num_blocks, dim=-1)
+
+    #     next_blocks = [
+    #         gru(xb, hb)
+    #         for gru, xb, hb in zip(self.gru_blocks, x_blocks, h_blocks)
+    #     ]
+
+    #     return torch.cat(next_blocks, dim=-1)
+    
     def initial(self, batch_size: int, device=None):
         device = device or next(self.parameters()).device
         deter = torch.zeros(batch_size, self.deter_dim, device=device)

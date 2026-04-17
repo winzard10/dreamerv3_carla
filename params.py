@@ -40,6 +40,8 @@ KL_SCALE        = 1.0   # NOTE: keep >= 2.0 — 1.0 starves the prior of gradien
 ENT_SCALE       = 1e-3
 OVERSHOOT_K     = 3
 OVERSHOOT_SCALE = 0.1
+GOAL_SCALE = 1.0
+VEC_SCALE  = 0.01        # velocity vector loss scale
 
 # TwoHot reward distribution
 BINS = 255
@@ -59,7 +61,6 @@ IMAG_LOG_EVERY            = 100
 IMAG_LOG_HORIZON          = 10
 IMAG_LOG_EXAMPLES         = 4
 FIXED_VAL_ENABLED         = True
-LOG_ACTOR_IMAG_IN_PHASE_A = False
 
 # =============================================================================
 # Evaluation / Test

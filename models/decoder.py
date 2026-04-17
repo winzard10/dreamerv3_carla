@@ -64,20 +64,37 @@ class MultiModalDecoder(nn.Module):
             ConvRefine(48, 32),
             nn.Conv2d(32, num_classes, kernel_size=3, stride=1, padding=1),
         )
+        
+        # Low-dim reconstruction heads
+        self.goal_head = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.ELU(),
+            nn.Linear(128, 2),   # goal is [speed_target, angle] or whatever your 2D goal is
+        )
+
+        self.vector_head = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.ELU(),
+            nn.Linear(128, 3),   # velocity vector
+        )
 
     def forward(self, deter, stoch):
-        x = torch.cat([deter, stoch], dim=-1)
-        bsz = x.shape[0]
+        flat = torch.cat([deter, stoch], dim=-1)  # [B, deter_dim + stoch_dim] — save this
+        bsz = flat.shape[0]
 
-        x = self.fc(x).view(bsz, 128, 16, 16)
+        # Conv path uses flat → spatial
+        x = self.fc(flat).view(bsz, 128, 16, 16)
         x = self.init_refine(x)
-
         x = self.up32(x)
         x = self.up64(x)
         x = self.up128(x)
         x = self.shared_refine(x)
 
-        depth = torch.sigmoid(self.depth_branch(x))
+        depth       = torch.sigmoid(self.depth_branch(x))
         segm_logits = self.segm_branch(x)
 
-        return depth, segm_logits
+        # Low-dim heads use the original flat latent — not the spatial x
+        goal_pred   = self.goal_head(flat)    # ← flat, not x
+        vector_pred = self.vector_head(flat)  # ← flat, not x
+
+        return depth, segm_logits, goal_pred, vector_pred
