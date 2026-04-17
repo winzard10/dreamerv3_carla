@@ -176,19 +176,23 @@ def compute_rssm_out(batch, encoder, rssm):
         depth_in=depth_in, sem_ids=sem_ids, goal_in=goal_in,
         resets=resets, B=B, T=T,
     )
-
+    
 
 @torch.no_grad()
 def log_recon_panels(writer, global_step, tag_prefix,
                      depth_in, sem_ids,
                      post_recon_depth, post_sem_logits,
-                     prior_recon_depth, prior_sem_logits):
-    vis_depth = torch.cat([depth_in[0:1], post_recon_depth[0:1], prior_recon_depth[0:1]], dim=-1)
+                     prior_recon_depth, prior_sem_logits,
+                     T=10):  # pass T so we can index the last timestep
+    # Last timestep of first batch item — most warmed-up GRU state
+    idx = T - 1  # b=0, t=T-1
+
+    vis_depth = torch.cat([depth_in[idx:idx+1], post_recon_depth[idx:idx+1], prior_recon_depth[idx:idx+1]], dim=-1)
     writer.add_image(f"{tag_prefix}/Depth_GT_Post_Prior", vis_depth.squeeze(0), global_step)
 
-    t_vis  = (sem_ids[0:1].float() / (NUM_CLASSES - 1)).unsqueeze(0)
-    po_vis = (torch.argmax(post_sem_logits[0:1], dim=1).float() / (NUM_CLASSES - 1)).unsqueeze(0)
-    pr_vis = (torch.argmax(prior_sem_logits[0:1], dim=1).float() / (NUM_CLASSES - 1)).unsqueeze(0)
+    t_vis  = (sem_ids[idx:idx+1].float() / (NUM_CLASSES - 1)).unsqueeze(0)
+    po_vis = (torch.argmax(post_sem_logits[idx:idx+1], dim=1).float() / (NUM_CLASSES - 1)).unsqueeze(0)
+    pr_vis = (torch.argmax(prior_sem_logits[idx:idx+1], dim=1).float() / (NUM_CLASSES - 1)).unsqueeze(0)
     writer.add_image(f"{tag_prefix}/Semantic_GT_Post_Prior",
                      torch.cat([t_vis, po_vis, pr_vis], dim=-1).squeeze(0), global_step)
 
@@ -299,8 +303,9 @@ def log_visuals(writer, global_step, rssm_out, rssm, decoder,
             out["prev_actions_seq"], out["goals_seq"], out["resets"],
         )
         log_recon_panels(writer, global_step, tag,
-                         out["depth_in"], out["sem_ids"],
-                         post_rd, post_sl, prior_rd, prior_sl)
+                        out["depth_in"], out["sem_ids"],
+                        post_rd, post_sl, prior_rd, prior_sl,
+                        T=out["T"])
 
     _log_one(rssm_out, tag_prefix)
 

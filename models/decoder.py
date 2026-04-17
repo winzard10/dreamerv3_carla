@@ -77,20 +77,22 @@ class MultiModalDecoder(nn.Module):
         )
 
     def forward(self, deter, stoch):
-        x = torch.cat([deter, stoch], dim=-1)
-        bsz = x.shape[0]
+        flat = torch.cat([deter, stoch], dim=-1)  # [B, deter_dim + stoch_dim] — save this
+        bsz = flat.shape[0]
 
-        x = self.fc(x).view(bsz, 128, 16, 16)
+        # Conv path uses flat → spatial
+        x = self.fc(flat).view(bsz, 128, 16, 16)
         x = self.init_refine(x)
-
         x = self.up32(x)
         x = self.up64(x)
         x = self.up128(x)
         x = self.shared_refine(x)
 
-        depth = torch.sigmoid(self.depth_branch(x))
+        depth       = torch.sigmoid(self.depth_branch(x))
         segm_logits = self.segm_branch(x)
-        goal_pred   = self.goal_head(x)     # [B, 2]
-        vector_pred = self.vector_head(x)   # [B, 3]
+
+        # Low-dim heads use the original flat latent — not the spatial x
+        goal_pred   = self.goal_head(flat)    # ← flat, not x
+        vector_pred = self.vector_head(flat)  # ← flat, not x
 
         return depth, segm_logits, goal_pred, vector_pred
