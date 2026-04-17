@@ -41,3 +41,6 @@ python3 -m test
 
 # Generate Graphs
 python3 -m utils.plotter
+
+# Imagination horizon
+python3 -m test_scripts.imagination_eval

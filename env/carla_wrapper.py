@@ -288,27 +288,7 @@ class CarlaEnv(gym.Env):
         r_idle = -0.05 if speed_kmh < 1.0 else 0.0
         r_offroad = -10.0 if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0 
 
-        # Action inconsistency penalty
-        r_smooth = 0.0
-        if self.prev_action is not None:
-            da= np.array(action, dtype=np.float32) - self.prev_action
-            # weighted squared difference
-            r_smooth = -(
-                0.08 * (da[0] ** 2) + # steer change penalty (can be tuned)
-                0.03 * (da[1] ** 2)   # throttle/break change penalty (can be tuned)
-            )
-
-        self.prev_action = np.array(action, dtype=np.float32)
-
-        # Calculate total reward
-        total_reward = (
-            (r_speed * r_center * r_angle)
-            + r_collision + r_stall + r_offroad + r_idle
-            + self.waypoint_reward
-            + r_smooth
-        )
-
-        # total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
+        total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
 
         return total_reward
 
