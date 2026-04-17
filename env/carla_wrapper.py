@@ -184,7 +184,7 @@ class CarlaEnv(gym.Env):
             # if longitudinal proximity is small enough, move-on to next point but give no reward
             if scl < 0.25:
                 self.current_waypoint_index += 1
-                print(f"Waypoint missed")
+                # print(f"Waypoint missed")
 
             
         
