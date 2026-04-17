@@ -156,14 +156,38 @@ class CarlaEnv(gym.Env):
             life_time=0.1
         )
         
+        # # Distance check
+        # dist = vehicle_loc.distance(target_loc)
+        
+        # # If within 1.0 meters, we hit it!
+        # if dist < 1.0:
+        #     self.current_waypoint_index += 1
+        #     self.waypoint_reward = 1.0 # The "Cookie" for progress!
+        #     # print(f"Waypoint {self.current_waypoint_index} Reached! (+1.0)")
+        
         # Distance check
-        dist = vehicle_loc.distance(target_loc)
+        t2v = vehicle_loc - target_loc  # vector pointing from target to vehicle
         
         # If within 1.0 meters, we hit it!
-        if dist < 1.0:
+        if t2v.length() < 0.07:
             self.current_waypoint_index += 1
             self.waypoint_reward = 1.0 # The "Cookie" for progress!
             # print(f"Waypoint {self.current_waypoint_index} Reached! (+1.0)")
+
+        # If missed, check if car has passed the waypoint longitudinally
+        elif self.current_waypoint_index > 0:
+            prev_loc = self.route_waypoints[self.current_waypoint_index - 1].transform.location
+            t2p = prev_loc - target_loc     # vector pointing from target to prev target
+            # compute scale of t2v projected onto t2p; this is longitudinal proximity
+            scl = t2p.x*t2v.x + t2p.y*t2v.y + t2p.z*t2v.z
+            scl = scl / t2p.length()
+            # if longitudinal proximity is small enough, move-on to next point but give no reward
+            if scl < 0.7:
+                self.current_waypoint_index += 1
+                print(f"Waypoint missed")
+
+            
+        
 
     def _setup_sensors(self):
         depth_bp = self.blueprint_library.find('sensor.camera.depth')
