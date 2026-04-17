@@ -62,6 +62,19 @@ class MultiModalDecoder(nn.Module):
             ConvRefine(48, 32),
             nn.Conv2d(32, num_classes, kernel_size=3, stride=1, padding=1),
         )
+        
+        # Low-dim reconstruction heads
+        self.goal_head = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.ELU(),
+            nn.Linear(128, 2),   # goal is [speed_target, angle] or whatever your 2D goal is
+        )
+
+        self.vector_head = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.ELU(),
+            nn.Linear(128, 3),   # velocity vector
+        )
 
     def forward(self, deter, stoch):
         x = torch.cat([deter, stoch], dim=-1)
@@ -77,5 +90,7 @@ class MultiModalDecoder(nn.Module):
 
         depth = torch.sigmoid(self.depth_branch(x))
         segm_logits = self.segm_branch(x)
+        goal_pred   = self.goal_head(x)     # [B, 2]
+        vector_pred = self.vector_head(x)   # [B, 3]
 
-        return depth, segm_logits
+        return depth, segm_logits, goal_pred, vector_pred

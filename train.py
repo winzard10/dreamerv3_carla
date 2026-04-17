@@ -10,8 +10,8 @@ from tqdm import tqdm
 
 from params import *
 from utils.train_utils import (
-    preprocess_batch, clone_batch_to_cpu, make_resets_from_dones, save_checkpoint,
-    world_model_step, actor_critic_step,
+    clone_batch_to_cpu, save_checkpoint,
+    compute_rssm_out, world_model_step, actor_critic_step,
     log_scalars, log_visuals,
     log_dataset_action_rollout, log_imagination_rollout,
 )
@@ -53,7 +53,7 @@ def main():
 
     rssm = RSSM(
         deter_dim=DETER_DIM, act_dim=2, embed_dim=EMBED_DIM, goal_dim=2,
-        stoch_categoricals=32, stoch_classes=32,
+        stoch_categoricals=STOCH_CATEGORICALS, stoch_classes=STOCH_CLASSES,
         unimix_ratio=0.01, kl_balance=0.8, free_nats=0.0,
     ).to(DEVICE)
 
@@ -101,6 +101,14 @@ def main():
         for m in [encoder, rssm, decoder, reward_head, cont_head]:
             m.train()
 
+        # Pre-compute fixed validation rssm_out once — reused every log step
+        fixed_rssm_out = None
+        if fixed_val_batch is not None:
+            with torch.no_grad():
+                fixed_rssm_out = compute_rssm_out(
+                    [x.to(DEVICE) for x in fixed_val_batch], encoder, rssm
+                )
+
         pbar = tqdm(range(PHASE_A_STEPS), desc="[Phase A] WM pretrain")
         for _ in pbar:
             batch = buffer.sample(BATCH_SIZE)
@@ -118,8 +126,8 @@ def main():
 
             if global_step % 100 == 0:
                 with torch.no_grad():
-                    log_visuals(writer, global_step, rssm_out, rssm, decoder, encoder,
-                                "Visuals_A", fixed_val_batch)
+                    log_visuals(writer, global_step, rssm_out, rssm, decoder,
+                                "Visuals_A", fixed_rssm_out)
                 save_checkpoint(
                     PHASE_A_PATH,
                     {k: all_models[k] for k in ["encoder", "rssm", "decoder", "reward_head", "cont_head"]},
@@ -138,14 +146,6 @@ def main():
                         future_actions=rssm_out["prev_actions_seq"][:, seed_t+1:seed_t+1+IMAG_LOG_HORIZON].detach(),
                         horizon=IMAG_LOG_HORIZON, tag_prefix="Visuals_A", num_examples=IMAG_LOG_EXAMPLES,
                     )
-                    if LOG_ACTOR_IMAG_IN_PHASE_A:
-                        log_imagination_rollout(
-                            writer, global_step, rssm, decoder, actor,
-                            rssm_out["deter_seq"][:, -1].detach(),
-                            rssm_out["stoch_seq"][:, -1].detach(),
-                            rssm_out["goals_seq"][:, -1].detach(),
-                            horizon=IMAG_LOG_HORIZON, tag_prefix="Visuals_A", num_examples=IMAG_LOG_EXAMPLES,
-                        )
 
             pbar.set_postfix({"wm": f"{losses['wm'].item():.3f}", "kl": f"{losses['kl'].item():.3f}"})
             writer.flush()
@@ -167,6 +167,15 @@ def main():
     print("\n[Phase B] Starting Online Interaction with CARLA...")
     env       = CarlaEnv()
     spectator = env.world.get_spectator()
+
+    # Pre-compute fixed validation rssm_out for Phase B logging
+    # NOTE: re-computed here since encoder/rssm weights may have changed
+    fixed_rssm_out_B = None
+    if fixed_val_batch is not None:
+        with torch.no_grad():
+            fixed_rssm_out_B = compute_rssm_out(
+                [x.to(DEVICE) for x in fixed_val_batch], encoder, rssm
+            )
 
     for episode in range(ckpt.get("episode", 0) + 1, PART_B_EPISODE + 1):
         obs, _         = env.reset()
@@ -232,27 +241,18 @@ def main():
 
                 if global_step % 100 == 0:
                     with torch.no_grad():
-                        log_visuals(writer, global_step, rssm_out, rssm, decoder, encoder,
-                                    "Visuals_B", fixed_val_batch)
+                        log_visuals(writer, global_step, rssm_out, rssm, decoder,
+                                    "Visuals_B", fixed_rssm_out_B)
 
                 if global_step % IMAG_LOG_EVERY == 0:
-                    seed_t = max(0, rssm_out["T"] - 1 - IMAG_LOG_HORIZON)
                     with torch.no_grad():
-                        log_dataset_action_rollout(
-                            writer, global_step, rssm, decoder,
-                            rssm_out["deter_seq"][:, seed_t].detach(),
-                            rssm_out["stoch_seq"][:, seed_t].detach(),
-                            rssm_out["post_logits_bt"][:, seed_t].detach(),
-                            rssm_out["goals_seq"][:, seed_t+1:seed_t+1+IMAG_LOG_HORIZON].detach(),
-                            rssm_out["prev_actions_seq"][:, seed_t+1:seed_t+1+IMAG_LOG_HORIZON].detach(),
-                            horizon=IMAG_LOG_HORIZON, tag_prefix="Visuals_B", num_examples=IMAG_LOG_EXAMPLES,
-                        )
                         log_imagination_rollout(
                             writer, global_step, rssm, decoder, actor,
                             rssm_out["deter_seq"][:, -1].detach(),
                             rssm_out["stoch_seq"][:, -1].detach(),
                             rssm_out["goals_seq"][:, -1].detach(),
-                            horizon=IMAG_LOG_HORIZON, tag_prefix="Visuals_B", num_examples=IMAG_LOG_EXAMPLES,
+                            horizon=IMAG_LOG_HORIZON, tag_prefix="Visuals_B",
+                            num_examples=IMAG_LOG_EXAMPLES,
                         )
 
                 pbar_steps.set_postfix({

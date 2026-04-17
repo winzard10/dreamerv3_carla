@@ -7,6 +7,7 @@ from params import (
     DEVICE, H, W, NUM_CLASSES,
     GAMMA, LAMBDA, IMAG_HORIZON,
     SEM_SCALE, REWARD_SCALE, CONT_SCALE, KL_SCALE, ENT_SCALE,
+    GOAL_SCALE, VEC_SCALE,
     OVERSHOOT_K, OVERSHOOT_SCALE,
     TARGET_EMA,
 )
@@ -79,32 +80,50 @@ def save_checkpoint(path, models, opts, global_step, episode=None):
 @torch.no_grad()
 def rollout_seeded_prior(rssm, post_deter_seq, post_stoch_seq,
                           actions_seq, goals_seq, resets=None):
+    """
+    1-step prior prediction at each timestep.
+    For each t, seeds from posterior at t-1 and does a single img_step.
+    Avoids compounding errors from chained prior rollouts.
+
+    t=0: no predecessor — use prior_net(post_deter_t0) as stand-in.
+    t>0: seed from posterior at t-1, one img_step → prior at t.
+    """
     B, T, D = post_deter_seq.shape
     device  = post_deter_seq.device
 
-    deter = post_deter_seq[:, 0]
-    stoch = post_stoch_seq[:, 0]
+    prior_deters = []
+    prior_stochs = []
+    prior_logits = []
 
-    prior_deters = [deter]
-    prior_stochs = [stoch]
-    prior_logits = [rssm.prior_net(deter)]
+    # t=0: no predecessor — use posterior deter as stand-in
+    prior_deters.append(post_deter_seq[:, 0])
+    prior_stochs.append(post_stoch_seq[:, 0])
+    prior_logits.append(rssm.prior_net(post_deter_seq[:, 0]))
 
     for t in range(1, T):
+        # Always seed fresh from posterior at t-1 — no error accumulation
+        deter = post_deter_seq[:, t - 1]
+        stoch = post_stoch_seq[:, t - 1]
+
+        # Re-seed from posterior at episode resets
         if resets is not None:
             r = resets[:, t].to(device).bool()
             if r.any():
                 deter = torch.where(r.unsqueeze(-1), post_deter_seq[:, t], deter)
                 stoch = torch.where(r.view(B, 1, 1), post_stoch_seq[:, t], stoch)
 
-        deter, stoch, logits_t = rssm.img_step(deter, stoch, actions_seq[:, t], goals_seq[:, t])
+        # One img_step from t-1 posterior → prior prediction for t
+        deter, stoch, logits_t = rssm.img_step(
+            deter, stoch, actions_seq[:, t], goals_seq[:, t]
+        )
         prior_deters.append(deter)
         prior_stochs.append(stoch)
         prior_logits.append(logits_t)
 
     return (
-        torch.stack(prior_deters, dim=1),
-        torch.stack(prior_stochs, dim=1),
-        torch.stack(prior_logits, dim=1),
+        torch.stack(prior_deters, dim=1),   # [B, T, D]
+        torch.stack(prior_stochs, dim=1),   # [B, T, C, K]
+        torch.stack(prior_logits, dim=1),   # [B, T, C*K]
     )
 
 
@@ -115,17 +134,48 @@ def decode_post_and_seeded_prior(rssm, decoder, post_deter_seq, post_stoch_seq,
 
     post_deter_flat  = post_deter_seq.reshape(B * T, D)
     _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_bt.reshape(B * T, -1))
-    post_recon_depth, post_sem_logits = decoder(post_deter_flat, post_probs.reshape(B * T, -1))
+    post_recon_depth, post_sem_logits, _, _ = decoder(
+        post_deter_flat, post_probs.reshape(B * T, -1)
+    )
 
     prior_deter_seq, _, prior_logits_bt = rollout_seeded_prior(
         rssm, post_deter_seq, post_stoch_seq, actions_seq, goals_seq, resets
     )
     _, prior_probs, _ = rssm.dist_from_logits_flat(prior_logits_bt.reshape(B * T, -1))
-    prior_recon_depth, prior_sem_logits = decoder(
+    prior_recon_depth, prior_sem_logits, _, _ = decoder(
         prior_deter_seq.reshape(B * T, D), prior_probs.reshape(B * T, -1)
     )
 
     return post_recon_depth, post_sem_logits, prior_recon_depth, prior_sem_logits
+
+
+@torch.no_grad()
+def compute_rssm_out(batch, encoder, rssm):
+    """
+    Forward pass only — no gradient update.
+    Used for computing rssm_out on the fixed validation batch.
+    Call once after capturing the fixed batch and reuse the result each log step.
+    """
+    depths, sems, vectors, goals, actions, rewards, dones = batch
+    depth_in, sem_ids, vec_in, goal_in, actions_seq, rewards_seq, dones_seq, goals_seq = \
+        preprocess_batch(depths, sems, vectors, goals, actions, rewards, dones)
+    B, T = actions_seq.shape[:2]
+
+    resets           = make_resets_from_dones(dones_seq)
+    prev_actions_seq = torch.zeros_like(actions_seq)
+    prev_actions_seq[:, 1:] = actions_seq[:, :-1]
+    prev_actions_seq *= (1.0 - resets.float().unsqueeze(-1))
+
+    embeds = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in).view(B, T, -1)
+    post   = rssm.observe(embeds, prev_actions_seq, goals_seq, resets=resets)
+
+    return dict(
+        deter_seq=post["deter"], stoch_seq=post["stoch"],
+        post_logits_bt=post["post_logits"], prior_logits_bt=post["prior_logits"],
+        prev_actions_seq=prev_actions_seq, goals_seq=goals_seq,
+        depth_in=depth_in, sem_ids=sem_ids, goal_in=goal_in,
+        resets=resets, B=B, T=T,
+    )
 
 
 @torch.no_grad()
@@ -156,7 +206,9 @@ def log_dataset_action_rollout(writer, global_step, rssm, decoder,
 
         deters, logits_seq = [deter], []
         for j in range(H_roll):
-            deter, stoch, logits_flat = rssm.img_step(deter, stoch, future_actions[:, j], future_goals[:, j])
+            deter, stoch, logits_flat = rssm.img_step(
+                deter, stoch, future_actions[:, j], future_goals[:, j]
+            )
             deters.append(deter)
             logits_seq.append(logits_flat)
 
@@ -165,14 +217,16 @@ def log_dataset_action_rollout(writer, global_step, rssm, decoder,
         deter_flat      = deters.reshape(B * (H_roll + 1), -1)
 
         _, seed_probs, _    = rssm.dist_from_logits_flat(start_post_logits)
-        _, rollout_probs, _ = rssm.dist_from_logits_flat(prior_logits_bt.reshape(B * H_roll, -1))
+        _, rollout_probs, _ = rssm.dist_from_logits_flat(
+            prior_logits_bt.reshape(B * H_roll, -1)
+        )
 
         all_stoch = torch.cat([
             seed_probs.reshape(B, -1).unsqueeze(1),
             rollout_probs.reshape(B, H_roll, -1),
         ], dim=1).reshape(B * (H_roll + 1), -1)
 
-        recon_depth, sem_logits = decoder(deter_flat, all_stoch)
+        recon_depth, sem_logits, _, _ = decoder(deter_flat, all_stoch)
         recon_depth = recon_depth.view(B, H_roll + 1, 1, H, W)
         sem_pred    = torch.argmax(sem_logits, dim=1).view(B, H_roll + 1, H, W)
 
@@ -205,13 +259,17 @@ def log_imagination_rollout(writer, global_step, rssm, decoder, actor,
         deters          = torch.stack(deters, dim=1)
         prior_logits_bt = torch.stack(logits_seq, dim=1)
 
-        _, rollout_probs, _ = rssm.dist_from_logits_flat(prior_logits_bt.reshape(B * horizon, -1))
+        _, rollout_probs, _ = rssm.dist_from_logits_flat(
+            prior_logits_bt.reshape(B * horizon, -1)
+        )
         all_stoch = torch.cat([
             rssm.flatten_stoch(start_stoch).unsqueeze(1),
             rollout_probs.reshape(B, horizon, -1),
         ], dim=1).reshape(B * (horizon + 1), -1)
 
-        recon_depth, sem_logits = decoder(deters.reshape(B * (horizon + 1), -1), all_stoch)
+        recon_depth, sem_logits, _, _ = decoder(
+            deters.reshape(B * (horizon + 1), -1), all_stoch
+        )
         recon_depth = recon_depth.view(B, horizon + 1, 1, H, W)
         sem_pred    = torch.argmax(sem_logits, dim=1).view(B, horizon + 1, H, W)
 
@@ -226,44 +284,28 @@ def log_imagination_rollout(writer, global_step, rssm, decoder, actor,
 
 
 @torch.no_grad()
-def log_visuals(writer, global_step, rssm_out, rssm, decoder, encoder,
-                tag_prefix, fixed_batch=None):
-    """Log GT/Post/Prior panels for current batch and optionally a fixed validation batch."""
-    def _log_one(deter_seq, stoch_seq, post_logits_bt, actions_seq, goals_seq,
-                 depth_in, sem_ids, resets, tag):
+def log_visuals(writer, global_step, rssm_out, rssm, decoder,
+                tag_prefix, fixed_rssm_out=None):
+    """
+    Log GT/Post/Prior reconstruction panels.
+    fixed_rssm_out: pre-computed rssm_out for the fixed validation batch.
+                    Compute once with compute_rssm_out() and reuse each log step.
+                    Pass None to skip fixed batch logging.
+    """
+    def _log_one(out, tag):
         post_rd, post_sl, prior_rd, prior_sl = decode_post_and_seeded_prior(
-            rssm, decoder, deter_seq, stoch_seq, post_logits_bt,
-            actions_seq, goals_seq, resets
+            rssm, decoder,
+            out["deter_seq"], out["stoch_seq"], out["post_logits_bt"],
+            out["prev_actions_seq"], out["goals_seq"], out["resets"],
         )
-        log_recon_panels(writer, global_step, tag, depth_in, sem_ids,
+        log_recon_panels(writer, global_step, tag,
+                         out["depth_in"], out["sem_ids"],
                          post_rd, post_sl, prior_rd, prior_sl)
 
-    _log_one(
-        rssm_out["deter_seq"], rssm_out["stoch_seq"], rssm_out["post_logits_bt"],
-        rssm_out["prev_actions_seq"], rssm_out["goals_seq"],
-        rssm_out["depth_in"], rssm_out["sem_ids"], rssm_out["resets"],
-        tag_prefix,
-    )
+    _log_one(rssm_out, tag_prefix)
 
-    if fixed_batch is None:
-        return
-
-    depths, sems, vectors, goals, actions, rewards, dones = (x.to(DEVICE) for x in fixed_batch)
-    depth_in, sem_ids, vec_in, goal_in, actions_seq, rewards_seq, dones_seq, goals_seq = \
-        preprocess_batch(depths, sems, vectors, goals, actions, rewards, dones)
-    vB, vT  = actions_seq.shape[:2]
-    resets  = make_resets_from_dones(dones_seq)
-    prev_actions = torch.zeros_like(actions_seq)
-    prev_actions[:, 1:] = actions_seq[:, :-1]
-    prev_actions *= (1.0 - resets.float().unsqueeze(-1))
-
-    embeds = encoder(depth_in, sem_ids.unsqueeze(1), vec_in, goal_in).view(vB, vT, -1)
-    v_post = rssm.observe(embeds, prev_actions, goals_seq, resets=resets)
-    _log_one(
-        v_post["deter"], v_post["stoch"], v_post["post_logits"],
-        prev_actions, goals_seq, depth_in, sem_ids, resets,
-        tag_prefix + "_Fixed",
-    )
+    if fixed_rssm_out is not None:
+        _log_one(fixed_rssm_out, tag_prefix + "_Fixed")
 
 
 # =============================================================================
@@ -303,13 +345,19 @@ def world_model_step(batch, encoder, rssm, decoder, reward_head, cont_head,
     stoch_flat_hard = rssm.flatten_stoch(stoch_seq.reshape(B * T, rssm.C, rssm.K))
 
     _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_bt.reshape(B * T, -1))
-    post_recon_depth, post_sem_logits = decoder(deter_flat, post_probs.reshape(B * T, -1))
+    post_recon_depth, post_sem_logits, post_goal_pred, post_vec_pred = \
+        decoder(deter_flat, post_probs.reshape(B * T, -1))
 
     post_sem_loss  = F.cross_entropy(post_sem_logits, sem_ids)
     post_depth_nll = gaussian_nll(depth_in, post_recon_depth).mean()
+    post_goal_loss = F.mse_loss(post_goal_pred, goal_in)
+    post_vec_loss  = F.mse_loss(post_vec_pred, vec_in)
+
     kl_loss        = rssm.kl_loss(post_logits_bt, prior_logits_bt)
-    overshoot_loss = rssm.overshooting_loss(deter_seq, stoch_seq, prev_actions_seq,
-                                            goals_seq, post_logits_bt, k=OVERSHOOT_K)
+    overshoot_loss = rssm.overshooting_loss(
+        deter_seq, stoch_seq, prev_actions_seq,
+        goals_seq, post_logits_bt, k=OVERSHOOT_K
+    )
     reward_loss = twohot.ce_loss(
         reward_head(deter_flat, stoch_flat_hard, goal_in),
         symlog(prev_rewards_seq.reshape(-1))
@@ -320,11 +368,14 @@ def world_model_step(batch, encoder, rssm, decoder, reward_head, cont_head,
     )
 
     wm_loss = (
-        post_depth_nll + SEM_SCALE * post_sem_loss
-        + KL_SCALE       * kl_loss
+        post_depth_nll
+        + SEM_SCALE       * post_sem_loss
+        + GOAL_SCALE      * post_goal_loss
+        + VEC_SCALE       * post_vec_loss
+        + KL_SCALE        * kl_loss
         + OVERSHOOT_SCALE * overshoot_loss
-        + REWARD_SCALE   * reward_loss
-        + CONT_SCALE     * cont_loss
+        + REWARD_SCALE    * reward_loss
+        + CONT_SCALE      * cont_loss
     )
 
     wm_opt.zero_grad(set_to_none=True)
@@ -332,8 +383,12 @@ def world_model_step(batch, encoder, rssm, decoder, reward_head, cont_head,
     torch.nn.utils.clip_grad_norm_(wm_params, max_norm=100.0)
     wm_opt.step()
 
-    losses = dict(wm=wm_loss, depth_nll=post_depth_nll, sem=post_sem_loss,
-                  kl=kl_loss, overshoot=overshoot_loss, reward=reward_loss, cont=cont_loss)
+    losses = dict(
+        wm=wm_loss, depth_nll=post_depth_nll, sem=post_sem_loss,
+        goal=post_goal_loss, vec=post_vec_loss,
+        kl=kl_loss, overshoot=overshoot_loss,
+        reward=reward_loss, cont=cont_loss,
+    )
     rssm_out = dict(
         deter_seq=deter_seq, stoch_seq=stoch_seq,
         post_logits_bt=post_logits_bt, prior_logits_bt=prior_logits_bt,
@@ -375,13 +430,21 @@ def actor_critic_step(rssm_out, rssm, reward_head, cont_head, actor, critic,
         all_deter_f  = imag["deter"].reshape(Bh1, -1)
         all_stoch_f  = rssm.flatten_stoch(imag["stoch"].reshape(Bh1, rssm.C, rssm.K))
 
-        imag_reward = symexp(twohot.mean(reward_head(next_deter_f, next_stoch_f, goal_h))).view(B, IMAG_HORIZON, 1)
-        discounts   = (GAMMA * torch.sigmoid(cont_head(next_deter_f, next_stoch_f, goal_h))).view(B, IMAG_HORIZON, 1).clamp(0, 1)
+        imag_reward = symexp(
+            twohot.mean(reward_head(next_deter_f, next_stoch_f, goal_h))
+        ).view(B, IMAG_HORIZON, 1)
+        discounts = (
+            GAMMA * torch.sigmoid(cont_head(next_deter_f, next_stoch_f, goal_h))
+        ).view(B, IMAG_HORIZON, 1).clamp(0, 1)
 
         with torch.no_grad():
-            target_v = symexp(twohot.mean(target_critic(all_deter_f, all_stoch_f, goal_h1))).view(B, IMAG_HORIZON + 1, 1)
+            target_v = symexp(
+                twohot.mean(target_critic(all_deter_f, all_stoch_f, goal_h1))
+            ).view(B, IMAG_HORIZON + 1, 1)
 
-        v = symexp(twohot.mean(critic(all_deter_f, all_stoch_f, goal_h1))).view(B, IMAG_HORIZON + 1, 1)
+        v = symexp(
+            twohot.mean(critic(all_deter_f, all_stoch_f, goal_h1))
+        ).view(B, IMAG_HORIZON + 1, 1)
 
         returns = lambda_return(
             reward=imag_reward, value=target_v[:, :-1], discount=discounts,
@@ -394,7 +457,10 @@ def actor_critic_step(rssm_out, rssm, reward_head, cont_head, actor, critic,
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
         actor_opt.zero_grad(set_to_none=True)
-        actor_loss = -(weights * adv).mean() - ENT_SCALE * (weights * imag["ent"].unsqueeze(-1)).mean()
+        actor_loss = (
+            -(weights * adv).mean()
+            - ENT_SCALE * (weights * imag["ent"].unsqueeze(-1)).mean()
+        )
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=100.0)
         actor_opt.step()
@@ -406,7 +472,9 @@ def actor_critic_step(rssm_out, rssm, reward_head, cont_head, actor, critic,
             p.requires_grad_(True)
 
     prev_deter_f = imag["deter"][:, :-1].reshape(Bh, -1).detach()
-    prev_stoch_f = rssm.flatten_stoch(imag["stoch"][:, :-1].reshape(Bh, rssm.C, rssm.K)).detach()
+    prev_stoch_f = rssm.flatten_stoch(
+        imag["stoch"][:, :-1].reshape(Bh, rssm.C, rssm.K)
+    ).detach()
 
     critic_opt.zero_grad(set_to_none=True)
     critic_loss = twohot.ce_loss(
@@ -428,6 +496,8 @@ def log_scalars(writer, global_step, losses, rssm_out, rssm, phase="Pretrain"):
 
     with torch.no_grad():
         B, T = rssm_out["B"], rssm_out["T"]
-        _, prior_probs, _ = rssm.dist_from_logits_flat(rssm_out["prior_logits_bt"].reshape(B * T, -1))
+        _, prior_probs, _ = rssm.dist_from_logits_flat(
+            rssm_out["prior_logits_bt"].reshape(B * T, -1)
+        )
         entropy = -(prior_probs * (prior_probs + 1e-8).log()).sum(-1).mean()
         writer.add_scalar(f"{phase}/prior_entropy", entropy.item(), global_step)
