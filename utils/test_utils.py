@@ -4,11 +4,7 @@ import cv2
 import torch
 import carla
 
-from params import (
-    DEVICE, NUM_CLASSES, H, W,
-    DETER_DIM, EMBED_DIM, STOCH_CATEGORICALS, STOCH_CLASSES, CKPT_PATH,
-    SHOW_RECON, SHOW_SPECTATOR, SHOW_EVERY_N_STEPS, TEST_NUM_EPISODES,
-)
+from params import *
 from models.encoder import MultiModalEncoder
 from models.rssm import RSSM
 from models.actor_critic import Actor
@@ -34,7 +30,7 @@ def show_reconstruction_windows(obs, deter, stoch, rssm, decoder) -> bool:
     """
     with torch.no_grad():
         stoch_flat = rssm.flatten_stoch(stoch)
-        recon_depth, recon_segm_logits = decoder(deter, stoch_flat)
+        recon_depth, recon_segm_logits, _, _ = decoder(deter, stoch_flat)
 
     gt_depth = obs["depth"][:, :, 0].astype(np.uint8)
     gt_segm  = obs["semantic"][:, :, 0].astype(np.uint8)
@@ -63,7 +59,7 @@ def build_models(model_path: str = CKPT_PATH):
     rssm    = RSSM(
         deter_dim=DETER_DIM, act_dim=2, embed_dim=EMBED_DIM, goal_dim=2,
         stoch_categoricals=STOCH_CATEGORICALS, stoch_classes=STOCH_CLASSES,
-        unimix_ratio=0.01, kl_balance=0.8, free_nats=0.0,
+        unimix_ratio=0.01, kl_balance=0.8, free_nats=FREE_NATS,
     ).to(DEVICE)
     actor   = Actor(
         deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2, action_dim=2,
@@ -152,7 +148,8 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
 
             waypoint = carla_map.get_waypoint(curr_loc)
             ep_center_dist.append(curr_loc.distance(waypoint.transform.location))
-            ep_speeds.append(float(obs["vector"][0]))
+            # Fix — denormalize (* 10.0) back to m/s then convert to km/h
+            ep_speeds.append(float(obs["vector"][0]) * 10.0 * 3.6)
             ep_rewards.append(float(reward))
 
             if SHOW_SPECTATOR:

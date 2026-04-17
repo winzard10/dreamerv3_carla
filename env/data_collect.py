@@ -2,38 +2,51 @@ import os
 import time
 import carla
 import numpy as np
-
 from params import (
     COLLECT_SAVE_DIR, COLLECT_TARGET_STEPS, SEQ_LEN,
     COLLECT_LOOKAHEAD, COLLECT_STEER_GAIN, COLLECT_THROTTLE,
     COLLECT_LOG_EVERY,
 )
-from env.carla_wrapper import CarlaEnv
+from env.carla_wrapper import CarlaEnv, GOAL_LOOKAHEAD
 
 
 def compute_expert_action(env) -> np.ndarray:
     """
     Pure pursuit expert controller.
-    Looks COLLECT_LOOKAHEAD waypoints ahead for smooth steering,
-    uses fixed throttle for constant-speed driving.
+    Uses COLLECT_LOOKAHEAD waypoints ahead for smooth steering.
+    COLLECT_LOOKAHEAD should match GOAL_LOOKAHEAD in carla_wrapper.py
+    so that collected goal vectors correspond to where the expert steers.
+
+    Currently: COLLECT_LOOKAHEAD == GOAL_LOOKAHEAD == 3
+    (3 waypoints × 2.0m = 6m lookahead)
     """
+    assert COLLECT_LOOKAHEAD == GOAL_LOOKAHEAD, (
+        f"COLLECT_LOOKAHEAD ({COLLECT_LOOKAHEAD}) must match "
+        f"GOAL_LOOKAHEAD ({GOAL_LOOKAHEAD}) in carla_wrapper.py — "
+        f"otherwise goal vectors in collected data won't match what the env produces."
+    )
+
     v_transform = env.vehicle.get_transform()
     v_loc       = v_transform.location
     v_fwd       = v_transform.get_forward_vector()
 
-    target_idx = min(env.current_waypoint_index + COLLECT_LOOKAHEAD,
-                     len(env.route_waypoints) - 1)
+    target_idx = min(
+        env.current_waypoint_index + COLLECT_LOOKAHEAD,
+        len(env.route_waypoints) - 1
+    )
     target_loc = env.route_waypoints[target_idx].transform.location
 
-    w_vec      = target_loc - v_loc
-    w_norm     = np.sqrt(w_vec.x ** 2 + w_vec.y ** 2) + 1e-5
-    w_vec_x    = w_vec.x / w_norm
-    w_vec_y    = w_vec.y / w_norm
+    w_vec   = target_loc - v_loc
+    w_norm  = np.sqrt(w_vec.x ** 2 + w_vec.y ** 2) + 1e-5
+    w_vec_x = w_vec.x / w_norm
+    w_vec_y = w_vec.y / w_norm
 
     dot   = v_fwd.x * w_vec_x + v_fwd.y * w_vec_y
     cross = v_fwd.x * w_vec_y - v_fwd.y * w_vec_x
     angle = np.arctan2(cross, dot)
     steer = np.clip(COLLECT_STEER_GAIN * angle, -1.0, 1.0)
+
+    # COLLECT_THROTTLE is in [0,1] space, convert to [-1,1] action space
     throttle = 2 * COLLECT_THROTTLE - 1
 
     return np.array([steer, throttle], dtype=np.float32)
@@ -54,27 +67,33 @@ def save_sequence(seq: dict, save_dir: str):
 
 
 def empty_seq() -> dict:
-    return {"depth": [], "semantic": [], "goal": [], "vector": [],
-            "action": [], "reward": [], "done": []}
+    return {
+        "depth": [], "semantic": [], "goal": [], "vector": [],
+        "action": [], "reward": [], "done": [],
+    }
 
 
 def run_collection():
     os.makedirs(COLLECT_SAVE_DIR, exist_ok=True)
 
-    env      = CarlaEnv()
-    obs, _   = env.reset()
-    seq      = empty_seq()
+    env    = CarlaEnv()
+    obs, _ = env.reset()
+    seq    = empty_seq()
     seq_saved = 0
 
     print(f"Starting data collection — target: {COLLECT_TARGET_STEPS} steps, "
           f"seq_len: {SEQ_LEN}")
+    print(f"  COLLECT_LOOKAHEAD: {COLLECT_LOOKAHEAD} waypoints "
+          f"({COLLECT_LOOKAHEAD * 2.0:.1f}m ahead)")
     print(f"  depth shape:    {obs['depth'].shape}")
     print(f"  semantic shape: {obs['semantic'].shape}")
+    print(f"  goal shape:     {obs['goal'].shape}  (normalized /10.0)")
+    print(f"  vector shape:   {obs['vector'].shape} (normalized /10.0)")
 
     for step in range(COLLECT_TARGET_STEPS):
         action = compute_expert_action(env)
 
-        # Update spectator camera
+        # Spectator camera
         v_transform = env.vehicle.get_transform()
         v_loc       = v_transform.location
         v_fwd       = v_transform.get_forward_vector()
@@ -86,7 +105,7 @@ def run_collection():
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
 
-        # Accumulate transition
+        # Accumulate transition — obs from BEFORE the step
         seq["depth"].append(obs["depth"])
         seq["semantic"].append(obs["semantic"])
         seq["goal"].append(obs["goal"])
@@ -111,7 +130,7 @@ def run_collection():
         if done:
             print(f"  Episode ended at step {step + 1}. Resetting...")
             obs, _ = env.reset()
-            seq    = empty_seq()   # discard incomplete sequence at episode boundary
+            seq = empty_seq()   # discard incomplete sequence at episode boundary
 
     print(f"\nCollection complete — {seq_saved} sequences saved to {COLLECT_SAVE_DIR}")
     env._cleanup()

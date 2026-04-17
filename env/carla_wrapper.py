@@ -1,49 +1,46 @@
 import time
 import carla
 import numpy as np
-import cv2
 import random
 import gymnasium as gym
 from gymnasium import spaces
 
+# How many waypoints ahead to use as the goal target.
+# Used for the dx/dy goal vector — points car toward near future.
+from params import COLLECT_LOOKAHEAD as GOAL_LOOKAHEAD
+
+
 class CarlaEnv(gym.Env):
     def __init__(self, town=None, host='127.0.0.1', port=2000):
         super(CarlaEnv, self).__init__()
-        # 1. Setup Client and World
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
-        # self.world = self.client.get_world()
-        # if town:
-        #     self.client.load_world(town)
-        
+
         if town:
-            # Map name in CARLA often looks like "Town01_Opt" or "Town01"
             current_map = self.client.get_world().get_map().name
             if town not in current_map:
                 print(f"Loading {town}...")
                 self.client.load_world(town)
-                
-        self.world = self.client.get_world()    
+
+        self.world = self.client.get_world()
         self.blueprint_library = self.world.get_blueprint_library()
         self.stuck_ticks = 0
-        self.waypoint_reward = 0.0 # NEW: Track impulse reward
-        self._DISTANCE_TO_CENTERLINE_THRESHOLD = 3.0 # Meters before we consider it "off-road"
+        self.waypoint_reward = 0.0
+        self._DISTANCE_TO_CENTERLINE_THRESHOLD = 3.0
         self.prev_action = None
 
-        # 2. Define Observation and Action Spaces
         self.observation_space = spaces.Dict({
-            "depth": spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
+            "depth":    spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
             "semantic": spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
-            "vector": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-            "goal": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32) 
+            "vector":   spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
+            "goal":     spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
         })
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
 
-        # 3. Internal State
         self.vehicle = None
         self.sensors = []
         self.last_data = {"depth": None, "semantic": None}
-    
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._cleanup()
@@ -58,181 +55,111 @@ class CarlaEnv(gym.Env):
         settings.fixed_delta_seconds = 0.05
         self.world.apply_settings(settings)
 
-        # --- Spawn Vehicle ---
         bp = self.blueprint_library.find('vehicle.tesla.model3')
-        self.map = self.world.get_map() 
+        self.map = self.world.get_map()
         spawn_point = random.choice(self.map.get_spawn_points())
         self.vehicle = self.world.spawn_actor(bp, spawn_point)
-        
-        # --- Generate Route (THE FIX) ---
-        # Do NOT ask self.vehicle.get_location() here. It returns (0,0,0).
-        # Use spawn_point.location directly.
+
         current_w = self.map.get_waypoint(spawn_point.location)
         self.route_waypoints = [current_w]
-        
-        # Generate the rest of the route
+
         for _ in range(5000):
-            # Safe check in case the map ends
             next_ws = self.route_waypoints[-1].next(2.0)
             if len(next_ws) > 0:
                 self.route_waypoints.append(next_ws[0])
             else:
                 break
-        
-        # DEBUG: Visualize the route with persistent lines (for debugging)
-        # for i in range(len(self.route_waypoints) - 1):
-        #     start = self.route_waypoints[i].transform.location + carla.Location(z=0.1)
-        #     end = self.route_waypoints[i+1].transform.location + carla.Location(z=0.1)
-        #     # Draw a persistent green line connecting the waypoints
-        #     self.world.debug.draw_line(start, end, thickness=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
 
-        self.current_waypoint_index = 1 
+        self.current_waypoint_index = 1
 
-        # 4. Attach Multi-Modal Sensors
         self._setup_sensors()
-        
-        # 5. Stability Ticks (Crucial for Physics)
-        # We tick BEFORE asking for observations so the car actually falls to the ground
+
         for _ in range(20):
             self.world.tick()
-        
-        # 6. Initialize Data
+
         max_tries = 100
         tries = 0
         while (self.last_data["depth"] is None or self.last_data["semantic"] is None) and tries < max_tries:
             self.world.tick()
             tries += 1
-            
+
         self.collision_hist = []
         return self._get_obs(), {}
 
     def step(self, action):
-        # print(f"[DEBUG Wrapper] NN Raw Action -> Steer: {action[0]:.2f}, Throttle/Brake: {action[1]:.2f}")
-        throttle_val = float((action[1] + 1) / 2) 
-        brake_val = 0.0
-        # print(f"[DEBUG Wrapper] Translated -> Throttle: {throttle_val:.2f}, Brake: {brake_val:.2f}")
+        throttle_val = float((action[1] + 1) / 2)
         control = carla.VehicleControl(
             steer=float(action[0]),
             throttle=float(max(0, throttle_val)),
-            brake=float(max(0, brake_val))
+            brake=0.0,
         )
         self.vehicle.apply_control(control)
-
         self.world.tick()
-        
-        # 1. Check Waypoint Logic FIRST (so reward is ready)
+
         self._check_waypoint_completion()
 
         obs = self._get_obs()
         reward = self._calculate_reward(action)
         terminated = self._check_done()
-        truncated = False          # time limit etc.
+        truncated = False
         done = terminated or truncated
-        
+
         if done:
             self.collision_hist = []
-        
+
         return obs, float(reward), terminated, truncated, {}
 
     def _check_waypoint_completion(self):
         """
-        New Logic: Only advance index if we are close to the target.
+        Advance waypoint index when car is within 1.5m of current target.
+        1.5m threshold with 2.0m waypoint spacing avoids accidentally
+        triggering the next waypoint while still at the current one.
         """
-        self.waypoint_reward = 0.0 # Reset every step
-        
+        self.waypoint_reward = 0.0
+
         if self.current_waypoint_index >= len(self.route_waypoints) - 1:
             return
 
-        # Get current target location
         target_loc = self.route_waypoints[self.current_waypoint_index].transform.location
         vehicle_loc = self.vehicle.get_location()
-        
-        # DEBUG: Draw a red "X" at the target waypoint for debugging
-        # self.world.debug.draw_string(
-        #     target_loc + carla.Location(z=1.0), 
-        #     "X", 
-        #     draw_shadow=False,
-        #     color=carla.Color(255, 0, 0), 
-        #     life_time=0.1
-        # )
-        
-        # Distance check
         dist = vehicle_loc.distance(target_loc)
-        
-        # If within 1.0 meters, we hit it!
-        if dist < 1.0:
+
+        if dist < 1.5:
             self.current_waypoint_index += 1
-            self.waypoint_reward = 1.0 # The "Cookie" for progress!
-            # print(f"Waypoint {self.current_waypoint_index} Reached! (+1.0)")
-
-    def _setup_sensors(self):
-        depth_bp = self.blueprint_library.find('sensor.camera.depth')
-        depth_bp.set_attribute('image_size_x', '128')
-        depth_bp.set_attribute('image_size_y', '128')
-        
-        sem_bp = self.blueprint_library.find('sensor.camera.semantic_segmentation')
-        sem_bp.set_attribute('image_size_x', '128')
-        sem_bp.set_attribute('image_size_y', '128')
-
-        transform = carla.Transform(carla.Location(x=1.6, z=1.7))
-        self.depth_sensor = self.world.spawn_actor(depth_bp, transform, attach_to=self.vehicle)
-        self.sem_sensor = self.world.spawn_actor(sem_bp, transform, attach_to=self.vehicle)
-        
-        self.depth_sensor.listen(lambda image: self._process_depth(image))
-        self.sem_sensor.listen(lambda image: self._process_sem(image))
-        
-        self.sensors.extend([self.depth_sensor, self.sem_sensor])
-        
-        col_bp = self.blueprint_library.find('sensor.other.collision')
-        self.col_sensor = self.world.spawn_actor(col_bp, carla.Transform(), attach_to=self.vehicle)
-        self.col_sensor.listen(lambda event: self._on_collision(event))
-        self.sensors.append(self.col_sensor)
-        self.collision_hist = []
-    
-    def _on_collision(self, event):
-        self.collision_hist.append(event)
-    
-    def _process_depth(self, image):
-        # This turns 24-bit raw depth into a 0-255 grayscale log map
-        image.convert(carla.ColorConverter.LogarithmicDepth) 
-        array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-        array = np.reshape(array, (image.height, image.width, 4))
-        self.last_data["depth"] = array[:, :, 0:1]
-    
-    def _process_sem(self, image):
-        # Convert to raw labels (NOT CityScapesPalette)
-        image.convert(carla.ColorConverter.Raw)
-
-        array = np.frombuffer(image.raw_data, dtype=np.uint8)
-        array = np.reshape(array, (image.height, image.width, 4))  # BGRA
-
-        # In Raw mode, the semantic tag is stored per-pixel.
-        # Use the R channel (index 2) as the class id.
-        sem_id = array[:, :, 2:3]  # uint8 IDs
-
-        self.last_data["semantic"] = sem_id
-        # if getattr(self, "_sem_dbg", 0) % 50 == 0:
-        #     print("sem min/max:", sem_id.min(), sem_id.max(), "unique:", len(np.unique(sem_id)))
-        # self._sem_dbg = getattr(self, "_sem_dbg", 0) + 1
+            self.waypoint_reward = 1.0
 
     def _get_obs(self):
-        # NOTE: Waypoint index logic moved to _check_waypoint_completion
-        
         player_transform = self.vehicle.get_transform()
-        target_waypoint = self.route_waypoints[self.current_waypoint_index]
-        local_goal = self.get_local_goal(player_transform, target_waypoint.transform.location)
-        
+
+        # Goal: dx/dy to a waypoint GOAL_LOOKAHEAD steps ahead.
+        # This is close enough (6m) to follow road curvature correctly,
+        # while still giving the actor a forward-looking direction signal.
+        # The car doesn't need to explicitly reach this waypoint —
+        # it gets reward by passing through intermediate 2m waypoints.
+        goal_idx = min(
+            self.current_waypoint_index + GOAL_LOOKAHEAD,
+            len(self.route_waypoints) - 1
+        )
+        target_waypoint = self.route_waypoints[goal_idx]
+        local_goal = self.get_local_goal(
+            player_transform,
+            target_waypoint.transform.location
+        )
+
         v = self.vehicle.get_velocity()
-        speed = np.sqrt(v.x**2 + v.y**2 + v.z**2)
-        vector = np.array([speed / 10.0, 0, 0], dtype=np.float32) 
+        speed_ms = np.sqrt(v.x**2 + v.y**2 + v.z**2)
 
         return {
-            "depth": self.last_data["depth"],
+            "depth":    self.last_data["depth"],
             "semantic": self.last_data["semantic"],
-            "vector": vector,
-            "goal": local_goal / 10.0 
+            # Normalized: speed in [0, ~1] for typical driving speeds
+            "vector":   np.array([speed_ms / 10.0, 0, 0], dtype=np.float32),
+            # Normalized: raw dx/dy in meters / 10.0
+            # With GOAL_LOOKAHEAD=3 and 2m spacing, raw values are ~0-6m
+            # After /10.0 they are ~0-0.6 — well scaled for the network
+            "goal":     (local_goal / 10.0).astype(np.float32),
         }
-    
+
     def get_local_goal(self, player_transform, goal_location):
         dx_world = goal_location.x - player_transform.location.x
         dy_world = goal_location.y - player_transform.location.y
@@ -240,72 +167,157 @@ class CarlaEnv(gym.Env):
         dx_local =  dx_world * np.cos(yaw) + dy_world * np.sin(yaw)
         dy_local = -dx_world * np.sin(yaw) + dy_world * np.cos(yaw)
         return np.array([dx_local, dy_local], dtype=np.float32)
-    
+
     def _get_dist_to_centerline(self):
         if self.current_waypoint_index < 1:
             return 0.0
-            
+
         A_loc = self.route_waypoints[self.current_waypoint_index - 1].transform.location
         B_loc = self.route_waypoints[self.current_waypoint_index].transform.location
         P_loc = self.vehicle.get_location()
 
-        # 1. Vector AP (Car to Start) and AB (Segment Direction)
         AP = np.array([P_loc.x - A_loc.x, P_loc.y - A_loc.y])
         AB = np.array([B_loc.x - A_loc.x, B_loc.y - A_loc.y])
-        
-        # 2. Standard CTE Formula using Cross Product
-        # Area of parallelogram / Base = Height (Distance)
-        # We use absolute value because distance is always positive
+
         cross_prod = np.abs(AP[0] * AB[1] - AP[1] * AB[0])
         norm_AB = np.linalg.norm(AB) + 1e-6
-        
+
         return cross_prod / norm_AB
-        
+
     def _calculate_reward(self, action):
         v = self.vehicle.get_velocity()
         speed_kmh = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
-        
-        # 1. CTE (Centerline Distance)
         cte = self._get_dist_to_centerline()
-        
-        # 2. SPEED (Targeting 25km/h)
-        r_speed = np.sqrt(speed_kmh / 25.0) if speed_kmh < 25 else 1.0 
 
-        # 3. CENTER (Penalty based on CTE)
-        r_center = max(0.0, 1.0 - (cte / self._DISTANCE_TO_CENTERLINE_THRESHOLD))
+        # ----------------------------------------------------------------
+        # 1. PROGRESS — primary signal, +5 per waypoint reached
+        # ----------------------------------------------------------------
+        r_progress = 5.0 if self.waypoint_reward > 0 else 0.0
 
-        # 4. ANGLE (Alignment with the line segment)
-        target_wp = self.route_waypoints[self.current_waypoint_index]
-        v_yaw = self.vehicle.get_transform().rotation.yaw
-        w_yaw = target_wp.transform.rotation.yaw
-        diff = abs(v_yaw - w_yaw) % 360
-        if diff > 180: diff = 360 - diff
-        r_angle = max(0.0, 1.0 - (diff / 30.0)) 
+        # ----------------------------------------------------------------
+        # 2. SPEED — linear ramp to target, gentle penalty above
+        # ----------------------------------------------------------------
+        target_speed = 25.0
+        if speed_kmh < 1.0:
+            r_speed = -0.5
+        elif speed_kmh <= target_speed:
+            r_speed = speed_kmh / target_speed
+        else:
+            r_speed = max(0.0, 1.0 - (speed_kmh - target_speed) / 15.0)
 
-        # Penalties
-        r_collision = -15.0 if len(self.collision_hist) > 0 else 0.0
-        r_stall = -10.0 if self.stuck_ticks >= 100 else 0.0 
-        r_idle = -0.05 if speed_kmh < 1.0 else 0.0
-        r_offroad = -10.0 if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0 
+        # ----------------------------------------------------------------
+        # 3. CENTERLINE — quadratic falloff, smooth near center
+        # ----------------------------------------------------------------
+        r_center = max(0.0, 1.0 - (cte / self._DISTANCE_TO_CENTERLINE_THRESHOLD) ** 2)
 
-        total_reward = (r_speed * r_center * r_angle) + r_collision + r_stall + r_offroad + r_idle + self.waypoint_reward
+        # ----------------------------------------------------------------
+        # 4. HEADING — alignment with CURRENT waypoint road direction
+        #    Uses current_waypoint_index (not lookahead) so it correctly
+        #    reflects the immediate road curvature the car is on.
+        #    Only active when moving to avoid misleading stationary signal.
+        # ----------------------------------------------------------------
+        if speed_kmh > 2.0:
+            target_wp = self.route_waypoints[self.current_waypoint_index]
+            v_yaw = self.vehicle.get_transform().rotation.yaw
+            w_yaw = target_wp.transform.rotation.yaw
+            diff = abs(v_yaw - w_yaw) % 360
+            if diff > 180:
+                diff = 360 - diff
+            r_heading = max(0.0, 1.0 - (diff / 45.0))
+        else:
+            r_heading = 0.0
 
-        return total_reward
+        # ----------------------------------------------------------------
+        # 5. CONTINUOUS DRIVING — additive, gated by speed
+        #    Scaled to zero when barely moving so stationary car
+        #    earns no driving reward
+        # ----------------------------------------------------------------
+        r_driving = (
+            0.3 * r_speed
+            + 0.4 * r_center
+            + 0.3 * r_heading
+        ) * min(1.0, speed_kmh / 5.0)
+
+        # ----------------------------------------------------------------
+        # 6. SMOOTHNESS — penalize jerky steering changes
+        # ----------------------------------------------------------------
+        if self.prev_action is not None:
+            steer_delta = abs(float(action[0]) - float(self.prev_action[0]))
+            r_smooth = -0.1 * steer_delta
+        else:
+            r_smooth = 0.0
+
+        # ----------------------------------------------------------------
+        # 7. HARD PENALTIES
+        # ----------------------------------------------------------------
+        r_collision = -20.0 if len(self.collision_hist) > 0 else 0.0
+        r_offroad   = -5.0  if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0
+        r_stall     = -5.0  if self.stuck_ticks >= 100 else 0.0
+
+        self.prev_action = action
+
+        return float(
+            r_progress
+            + r_driving
+            + r_smooth
+            + r_collision
+            + r_offroad
+            + r_stall
+        )
 
     def _check_done(self):
         if self.current_waypoint_index >= len(self.route_waypoints) - 10:
             return True
         if len(self.collision_hist) > 0:
             return True
-        
+
         v = self.vehicle.get_velocity()
         speed = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
         self.stuck_ticks = self.stuck_ticks + 1 if speed < 1.0 else 0
 
         if self.stuck_ticks > 100 or self._get_dist_to_centerline() > self._DISTANCE_TO_CENTERLINE_THRESHOLD:
             return True
-            
+
         return False
+
+    def _setup_sensors(self):
+        depth_bp = self.blueprint_library.find('sensor.camera.depth')
+        depth_bp.set_attribute('image_size_x', '128')
+        depth_bp.set_attribute('image_size_y', '128')
+
+        sem_bp = self.blueprint_library.find('sensor.camera.semantic_segmentation')
+        sem_bp.set_attribute('image_size_x', '128')
+        sem_bp.set_attribute('image_size_y', '128')
+
+        transform = carla.Transform(carla.Location(x=1.6, z=1.7))
+        self.depth_sensor = self.world.spawn_actor(depth_bp, transform, attach_to=self.vehicle)
+        self.sem_sensor   = self.world.spawn_actor(sem_bp,   transform, attach_to=self.vehicle)
+
+        self.depth_sensor.listen(lambda image: self._process_depth(image))
+        self.sem_sensor.listen(lambda image: self._process_sem(image))
+
+        self.sensors.extend([self.depth_sensor, self.sem_sensor])
+
+        col_bp = self.blueprint_library.find('sensor.other.collision')
+        self.col_sensor = self.world.spawn_actor(col_bp, carla.Transform(), attach_to=self.vehicle)
+        self.col_sensor.listen(lambda event: self._on_collision(event))
+        self.sensors.append(self.col_sensor)
+        self.collision_hist = []
+
+    def _on_collision(self, event):
+        self.collision_hist.append(event)
+
+    def _process_depth(self, image):
+        image.convert(carla.ColorConverter.LogarithmicDepth)
+        array = np.frombuffer(image.raw_data, dtype=np.uint8)
+        array = np.reshape(array, (image.height, image.width, 4))
+        self.last_data["depth"] = array[:, :, 0:1]
+
+    def _process_sem(self, image):
+        image.convert(carla.ColorConverter.Raw)
+        array = np.frombuffer(image.raw_data, dtype=np.uint8)
+        array = np.reshape(array, (image.height, image.width, 4))
+        self.last_data["semantic"] = array[:, :, 2:3]
 
     def _cleanup(self):
         for s in self.sensors:

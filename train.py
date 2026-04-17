@@ -54,7 +54,7 @@ def main():
     rssm = RSSM(
         deter_dim=DETER_DIM, act_dim=2, embed_dim=EMBED_DIM, goal_dim=2,
         stoch_categoricals=STOCH_CATEGORICALS, stoch_classes=STOCH_CLASSES,
-        unimix_ratio=0.01, kl_balance=0.8, free_nats=0.5,
+        unimix_ratio=0.01, kl_balance=0.8, free_nats=FREE_NATS,
     ).to(DEVICE)
 
     Z_DIM   = rssm.stoch_dim

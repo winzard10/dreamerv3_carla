@@ -13,6 +13,7 @@ DETER_DIM         = 512
 EMBED_DIM         = 1024
 STOCH_CATEGORICALS = 32
 STOCH_CLASSES      = 32
+FREE_NATS           = 0.5
 
 # Phase A
 PHASE_A_STEPS = 20000
@@ -35,12 +36,12 @@ CRITIC_LR = 3e-5
 SEM_SCALE       = 10.0
 REWARD_SCALE    = 1.0
 CONT_SCALE      = 1.0
-KL_SCALE        = 1.0   # NOTE: keep >= 2.0 — 1.0 starves the prior of gradient
+KL_SCALE        = 1.0   
 ENT_SCALE       = 1e-3
 OVERSHOOT_K     = 3
 OVERSHOOT_SCALE = 0.1
 GOAL_SCALE = 1.0
-VEC_SCALE  = 0.01        # velocity vector loss scale
+VEC_SCALE  = 1.0        # velocity vector loss scale
 
 # TwoHot reward distribution
 BINS = 255
@@ -77,7 +78,7 @@ SHOW_EVERY_N_STEPS = 3
 SEQ_LEN              = 10    # increase when collecting new data for better prior
 COLLECT_SAVE_DIR     = "./data/expert_sequences"
 COLLECT_TARGET_STEPS = 50000
-COLLECT_LOOKAHEAD    = 2     # waypoints ahead for expert steering
+COLLECT_LOOKAHEAD    = 3     # waypoints ahead for expert steering
 COLLECT_STEER_GAIN   = 0.85
 COLLECT_THROTTLE     = 0.4  # maps to 40% throttle in CarlaEnv wrapper
 COLLECT_LOG_EVERY    = 100
