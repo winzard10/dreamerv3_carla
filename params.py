@@ -39,8 +39,8 @@ KL_SCALE        = 1.0   # NOTE: keep >= 2.0 — 1.0 starves the prior of gradien
 ENT_SCALE       = 1e-3
 OVERSHOOT_K     = 3
 OVERSHOOT_SCALE = 0.1
-GOAL_SCALE = 0.0
-VEC_SCALE  = 0.0        # velocity vector loss scale
+GOAL_SCALE = 1.0
+VEC_SCALE  = 0.01        # velocity vector loss scale
 
 # TwoHot reward distribution
 BINS = 255
