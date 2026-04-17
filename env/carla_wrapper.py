@@ -169,7 +169,7 @@ class CarlaEnv(gym.Env):
         t2v = vehicle_loc - target_loc  # vector pointing from target to vehicle
         
         # If within 1.0 meters, we hit it!
-        if t2v.length() < 0.07:
+        if t2v.length() < 1.0:
             self.current_waypoint_index += 1
             self.waypoint_reward = 1.0 # The "Cookie" for progress!
             # print(f"Waypoint {self.current_waypoint_index} Reached! (+1.0)")
@@ -182,7 +182,7 @@ class CarlaEnv(gym.Env):
             scl = t2p.x*t2v.x + t2p.y*t2v.y + t2p.z*t2v.z
             scl = scl / t2p.length()
             # if longitudinal proximity is small enough, move-on to next point but give no reward
-            if scl < 0.7:
+            if scl < 0.25:
                 self.current_waypoint_index += 1
                 print(f"Waypoint missed")
 
