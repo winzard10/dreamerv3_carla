@@ -35,8 +35,6 @@ class RSSM(nn.Module):
         self.unimix_ratio = float(unimix_ratio)
         self.kl_balance = float(kl_balance)
         self.free_nats = float(free_nats)
-
-        # self.gru = nn.GRUCell(self.stoch_dim + self.act_dim + self.goal_dim, self.deter_dim)
         
         # Action + goal get their own projection so they aren't
         # drowned out by the 1024-dim stoch signal
@@ -53,21 +51,12 @@ class RSSM(nn.Module):
             nn.ELU(),
         )
 
-        # Block GRU — empirically helped you, keep it
-        self.num_blocks = 8
-        self.block_dim  = self.deter_dim // self.num_blocks  # 64
-        self.gru_blocks = nn.ModuleList([
-            nn.GRUCell(self.block_dim, self.block_dim)
-            for _ in range(self.num_blocks)
-        ])
+        self.gru = nn.GRUCell(self.deter_dim, self.deter_dim)
 
         hidden = self.deter_dim * 2
 
         self.prior_net = nn.Sequential(
             nn.Linear(self.deter_dim, hidden),
-            nn.LayerNorm(hidden),
-            nn.ELU(),
-            nn.Linear(hidden, hidden),
             nn.LayerNorm(hidden),
             nn.ELU(),
             nn.Linear(hidden, hidden),
@@ -134,16 +123,7 @@ class RSSM(nn.Module):
         # 2. Project combined input — pre_gru does the mixing
         x = self.pre_gru(torch.cat([prev_stoch_flat, ag], dim=-1))       # [B, deter_dim]
 
-        # 3. Chunk and run block GRU
-        x_blocks = torch.chunk(x, self.num_blocks, dim=-1)
-        h_blocks = torch.chunk(deter_in, self.num_blocks, dim=-1)
-
-        next_blocks = [
-            gru(xb, hb)
-            for gru, xb, hb in zip(self.gru_blocks, x_blocks, h_blocks)
-        ]
-
-        return torch.cat(next_blocks, dim=-1)  # [B, deter_dim]
+        return self.gru(x, deter_in)  # [B, deter_dim]
     
     def initial(self, batch_size: int, device=None):
         device = device or next(self.parameters()).device
