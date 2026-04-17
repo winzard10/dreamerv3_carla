@@ -148,13 +148,13 @@ class CarlaEnv(gym.Env):
         vehicle_loc = self.vehicle.get_location()
         
         # DEBUG: Draw a red "X" at the target waypoint for debugging
-        # self.world.debug.draw_string(
-        #     target_loc + carla.Location(z=1.0), 
-        #     "X", 
-        #     draw_shadow=False,
-        #     color=carla.Color(255, 0, 0), 
-        #     life_time=0.1
-        # )
+        self.world.debug.draw_string(
+            target_loc + carla.Location(z=1.0), 
+            "X", 
+            draw_shadow=False,
+            color=carla.Color(255, 0, 0), 
+            life_time=0.1
+        )
         
         # Distance check
         dist = vehicle_loc.distance(target_loc)
