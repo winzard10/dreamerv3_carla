@@ -246,7 +246,7 @@ class CarlaEnv(gym.Env):
         elif speed_kmh <= target_speed:
             r_speed = speed_kmh / target_speed
         else:
-            r_speed = max(0.0, 1.0 - (speed_kmh - target_speed) / 15.0)
+            r_speed = max(0.0, 1.0 - (speed_kmh - target_speed) / target_speed)
 
         # ----------------------------------------------------------------
         # 3. CENTERLINE — quadratic falloff, smooth near center
@@ -282,14 +282,13 @@ class CarlaEnv(gym.Env):
         # 6. CONTROL REGULARIZATION
         #    (a) Steering magnitude — mild penalty, doesn't prevent sharp turns
         #    (b) Control rate — penalize jerky changes (main smoothness signal)
-        #    NOTE: throttle magnitude penalty removed — it created incentive
-        #    to coast, conflicting with speed reward.
         # ----------------------------------------------------------------
         steer        = float(action[0])
         throttle_cmd = float((action[1] + 1) / 2)
 
         # (a) Steering magnitude — gentle, allows sharp turns when needed
-        r_ctrl_mag = -0.00 * (steer ** 2) # 0.01
+        r_ctrl_mag = (-0.000 * (steer ** 2) # 0.01
+                    - 0.00 * (throttle_cmd ** 2)) # 0.01
 
         # (b) Control rate — main smoothness penalty
         if self.prev_action is not None:
