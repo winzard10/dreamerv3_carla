@@ -52,7 +52,7 @@ VMAX =  20.0
 TARGET_EMA = 0.99
 
 # Checkpoints
-LOAD_PRETRAINED = False
+LOAD_PRETRAINED = True
 CKPT_DIR        = "checkpoints/dreamerv3"
 CKPT_PATH       = "checkpoints/dreamerv3/dreamerv3_latest.pth"
 
@@ -65,7 +65,7 @@ FIXED_VAL_ENABLED         = True
 # =============================================================================
 # Evaluation / Test
 # =============================================================================
-TEST_MODEL         = "dreamerv3_ep700.pth"
+TEST_MODEL         = "dreamerv3_latest.pth"
 TEST_TOWN          = "Town10HD"
 TEST_NUM_EPISODES  = 20 
 SHOW_RECON         = True

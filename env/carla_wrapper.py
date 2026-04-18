@@ -275,20 +275,41 @@ class CarlaEnv(gym.Env):
         #    Scaled to zero when barely moving so stationary car
         #    earns no driving reward
         # ----------------------------------------------------------------
+        stability_gate = 0.5 + 0.5 * r_center
         r_driving = (
             0.3 * r_speed
             + 0.4 * r_center
             + 0.3 * r_heading
-        ) * min(1.0, speed_kmh / 5.0)
+        ) * min(1.0, speed_kmh / 5.0) * stability_gate
 
         # ----------------------------------------------------------------
-        # 6. SMOOTHNESS — penalize jerky steering changes
+        # 6. CONTROL REGULARIZATION — MPC-style
+        #    (a) penalize large steering/throttle
+        #    (b) penalize changes in steering/throttle
         # ----------------------------------------------------------------
+        steer = float(action[0])
+        throttle_cmd = float((action[1] + 1) / 2)   # same mapping used in step()
+
+        # A) control magnitude penalty: discourage aggressive actions
+        r_ctrl_mag = (
+            -0.05 * (steer ** 2)
+            -0.02 * (throttle_cmd ** 2)
+        )
+
+        # B) control rate penalty: discourage oscillation / jerk
         if self.prev_action is not None:
-            steer_delta = abs(float(action[0]) - float(self.prev_action[0]))
-            r_smooth = -0.1 * steer_delta
+            prev_steer = float(self.prev_action[0])
+            prev_throttle_cmd = float((self.prev_action[1] + 1) / 2)
+
+            delta_steer = steer - prev_steer
+            delta_throttle = throttle_cmd - prev_throttle_cmd
+
+            r_ctrl_rate = (
+                -0.15 * (delta_steer ** 2)
+                -0.05 * (delta_throttle ** 2)
+            )
         else:
-            r_smooth = 0.0
+            r_ctrl_rate = 0.0
 
         # ----------------------------------------------------------------
         # 7. HARD PENALTIES
@@ -297,12 +318,13 @@ class CarlaEnv(gym.Env):
         r_offroad   = -5.0  if cte > self._DISTANCE_TO_CENTERLINE_THRESHOLD else 0.0
         r_stall     = -5.0  if self.stuck_ticks >= 100 else 0.0
 
-        self.prev_action = action
+        self.prev_action = np.array(action, dtype=np.float32)
 
         return float(
             r_progress
             + r_driving
-            + r_smooth
+            + r_ctrl_mag
+            + r_ctrl_rate
             + r_collision
             + r_offroad
             + r_stall

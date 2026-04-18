@@ -202,28 +202,37 @@ class RSSM(nn.Module):
             "prior_logits": torch.stack(prior_logits_list, dim=1),
         }
 
-    def imagine(self, start_deter, start_stoch, actor, goal, horizon: int):
+    def imagine(self, start_deter, start_stoch, actor, goal, start_prev_action, horizon):
+        """
+        Imagination rollout with prev_action tracking.
+        start_prev_action: [B, action_dim] — the last real action before imagination starts.
+        """
         deter = start_deter
         stoch = start_stoch
-        deters = [deter]
-        stochs = [stoch]
-        ents = []
+        prev_action = start_prev_action  # tracked through rollout
+
+        deters  = [deter]
+        stochs  = [stoch]
+        ents    = []
         actions = []
 
         for _ in range(horizon):
             stoch_flat = self.flatten_stoch(stoch)
-            action, logp, entropy, mean = actor(deter, stoch_flat, goal, sample=True)
+            action, _, entropy, _ = actor(deter, stoch_flat, goal, prev_action, sample=True)
             deter, stoch, _ = self.img_step(deter, stoch, action, goal)
+
             actions.append(action)
             ents.append(entropy)
             deters.append(deter)
             stochs.append(stoch)
 
+            prev_action = action  # this step's action becomes next step's prev_action
+
         return {
-            "deter":  torch.stack(deters, dim=1),   # [B, H+1, D]
-            "stoch":  torch.stack(stochs, dim=1),   # [B, H+1, C, K]
-            "action": torch.stack(actions, dim=1),  # [B, H, A]
-            "ent":    torch.stack(ents, dim=1),     # [B, H]
+            "deter":  torch.stack(deters, dim=1),
+            "stoch":  torch.stack(stochs, dim=1),
+            "action": torch.stack(actions, dim=1),
+            "ent":    torch.stack(ents, dim=1),
         }
 
     # -----------------------------------------------------------------------

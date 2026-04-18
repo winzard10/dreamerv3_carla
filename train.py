@@ -186,7 +186,10 @@ def main():
 
                 embed = encoder(depth_in, sem_ids, vec_in, goal_in)
                 prev_deter, prev_stoch, _, _ = rssm.obs_step(prev_deter, prev_stoch, prev_action, embed, goal_in)
-                action_th, _, _, _ = actor(prev_deter, rssm.flatten_stoch(prev_stoch), goal_in, sample=True)
+                action_th, _, _, _ = actor(
+                    prev_deter, rssm.flatten_stoch(prev_stoch), goal_in,
+                    prev_action, sample=True
+                )
 
             act_np = action_th.cpu().numpy()[0]
             next_obs, reward, terminated, truncated, _ = env.step(act_np)
@@ -244,7 +247,9 @@ def main():
                             rssm_out["deter_seq"][:, -1].detach(),
                             rssm_out["stoch_seq"][:, -1].detach(),
                             rssm_out["goals_seq"][:, -1].detach(),
-                            horizon=IMAG_LOG_HORIZON, tag_prefix="Visuals_B",
+                            rssm_out["prev_actions_seq"][:, -1].detach(),
+                            horizon=IMAG_LOG_HORIZON,
+                            tag_prefix="Visuals_B",
                             num_examples=IMAG_LOG_EXAMPLES,
                         )
 
@@ -260,7 +265,7 @@ def main():
         writer.flush()
         print(f"Episode {episode} | Reward: {episode_reward:.2f}")
 
-        if episode % 50 == 0:
+        if episode % 100 == 0:
             save_checkpoint(CKPT_PATH, all_models, all_opts, global_step, episode)
             save_checkpoint(
                 os.path.join(CKPT_DIR, f"dreamerv3_ep{episode}.pth"),

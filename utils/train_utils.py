@@ -245,20 +245,28 @@ def log_dataset_action_rollout(writer, global_step, rssm, decoder,
 
 
 @torch.no_grad()
-def log_imagination_rollout(writer, global_step, rssm, decoder, actor,
-                             start_deter, start_stoch, goal0,
-                             horizon=5, tag_prefix="Visuals", num_examples=4):
+def log_imagination_rollout(
+    writer, global_step, rssm, decoder, actor,
+    start_deter, start_stoch, start_goal, start_prev_action,  # ← new
+    horizon, tag_prefix, num_examples,
+):
     rssm.eval(); decoder.eval(); actor.eval()
     try:
         B = start_deter.shape[0]
-        deter, stoch = start_deter, start_stoch
+        deter = start_deter
+        stoch = start_stoch
+        prev_action = start_prev_action
+        goal = start_goal
         deters, logits_seq = [deter], []
 
         for _ in range(horizon):
-            action, _, _, _ = actor(deter, rssm.flatten_stoch(stoch), goal0, sample=True)
-            deter, stoch, logits_flat = rssm.img_step(deter, stoch, action, goal0)
+            stoch_flat = rssm.flatten_stoch(stoch)
+            action, _, _, _ = actor(deter, stoch_flat, goal, prev_action, sample=False)
+            deter, stoch, logits_flat = rssm.img_step(deter, stoch, action, goal)
+
             deters.append(deter)
             logits_seq.append(logits_flat)
+            prev_action = action
 
         deters          = torch.stack(deters, dim=1)
         prior_logits_bt = torch.stack(logits_seq, dim=1)
@@ -397,7 +405,7 @@ def world_model_step(batch, encoder, rssm, decoder, reward_head, cont_head,
     rssm_out = dict(
         deter_seq=deter_seq, stoch_seq=stoch_seq,
         post_logits_bt=post_logits_bt, prior_logits_bt=prior_logits_bt,
-        prev_actions_seq=prev_actions_seq, goals_seq=goals_seq,
+        prev_actions_seq=prev_actions_seq, actions_seq=actions_seq, goals_seq=goals_seq,
         depth_in=depth_in, sem_ids=sem_ids, goal_in=goal_in,
         resets=resets, B=B, T=T,
     )
@@ -423,7 +431,14 @@ def actor_critic_step(rssm_out, rssm, reward_head, cont_head, actor, critic,
         for p in critic.parameters():
             p.requires_grad_(False)
 
-        imag = rssm.imagine(start_deter, start_stoch, actor, goal0, horizon=IMAG_HORIZON)
+        # Before the imagine call:
+        start_prev_action = rssm_out["actions_seq"][:, -1].detach()  # [B, action_dim]
+
+        imag = rssm.imagine(
+            start_deter, start_stoch, actor, goal0,
+            start_prev_action=start_prev_action,
+            horizon=IMAG_HORIZON,
+        )
 
         Bh      = B * IMAG_HORIZON
         Bh1     = B * (IMAG_HORIZON + 1)

@@ -23,14 +23,17 @@ def colorize_segmentation(seg_ids: np.ndarray, num_classes: int = NUM_CLASSES) -
     return colors[seg_ids]
 
 
-def show_reconstruction_windows(obs, deter, stoch, rssm, decoder) -> bool:
+def show_reconstruction_windows(obs, deter, post_logits_flat, rssm, decoder) -> bool:
     """
     Renders GT vs reconstructed depth and semantic side-by-side.
-    Returns False if the user pressed 'q' (signal to stop showing).
+    Uses SOFT posterior probabilities for decoding visualization.
+    Returns False if the user pressed 'q'.
     """
     with torch.no_grad():
-        stoch_flat = rssm.flatten_stoch(stoch)
-        recon_depth, recon_segm_logits, _, _ = decoder(deter, stoch_flat)
+        _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_flat)
+        stoch_soft_flat = post_probs.reshape(post_probs.shape[0], -1)
+
+        recon_depth, recon_segm_logits, _, _ = decoder(deter, stoch_soft_flat)
 
     gt_depth = obs["depth"][:, :, 0].astype(np.uint8)
     gt_segm  = obs["semantic"][:, :, 0].astype(np.uint8)
@@ -42,11 +45,10 @@ def show_reconstruction_windows(obs, deter, stoch, rssm, decoder) -> bool:
     segm_vis     = np.concatenate([colorize_segmentation(gt_segm), colorize_segmentation(recon_segm_ids)], axis=1)
     segm_vis_bgr = cv2.cvtColor(segm_vis, cv2.COLOR_RGB2BGR)
 
-    cv2.imshow("Depth (GT | Recon)",    depth_vis)
+    cv2.imshow("Depth (GT | Recon)", depth_vis)
     cv2.imshow("Semantic (GT | Recon)", segm_vis_bgr)
 
     return (cv2.waitKey(1) & 0xFF) != ord("q")
-
 
 # =============================================================================
 # Model loading
@@ -132,14 +134,20 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
         while not done:
             with torch.no_grad():
                 depth, sem, vec, goal = preprocess_obs(obs)
-                embed = encoder(depth, sem, vec, goal)   # [1, EMBED_DIM]
+                embed = encoder(depth, sem, vec, goal)
 
-                deter, stoch, _, _ = rssm.obs_step(deter, stoch, prev_action, embed, goal)
-                action, _, _, _    = actor(deter, rssm.flatten_stoch(stoch), goal, sample=False)
-                prev_action        = action
+                deter, stoch, post_logits_flat, _ = rssm.obs_step(
+                    deter, stoch, prev_action, embed, goal
+                )
+                action, _, _, _ = actor(
+                    deter, rssm.flatten_stoch(stoch), goal, prev_action, sample=False
+                )
+                prev_action = action.detach()
 
             if keep_showing and step % SHOW_EVERY_N_STEPS == 0:
-                keep_showing = show_reconstruction_windows(obs, deter, stoch, rssm, decoder)
+                keep_showing = show_reconstruction_windows(
+                    obs, deter, post_logits_flat, rssm, decoder
+                )
 
             obs, reward, terminated, truncated, _ = env.step(action.detach().cpu().numpy()[0])
             done = terminated or truncated
