@@ -37,7 +37,7 @@ SEM_SCALE       = 10.0
 REWARD_SCALE    = 1.0
 CONT_SCALE      = 1.0
 KL_SCALE        = 1.0   
-ENT_SCALE       = 1e-3
+ENT_SCALE       = 5e-4 # 1e-3
 OVERSHOOT_K     = 3
 OVERSHOOT_SCALE = 0.1
 GOAL_SCALE = 1.0
@@ -65,7 +65,7 @@ FIXED_VAL_ENABLED         = True
 # =============================================================================
 # Evaluation / Test
 # =============================================================================
-TEST_MODEL         = "dreamerv3_latest.pth"
+TEST_MODEL         = "dreamerv3_ep400.pth"
 TEST_TOWN          = "Town10HD"
 TEST_NUM_EPISODES  = 20 
 SHOW_RECON         = True

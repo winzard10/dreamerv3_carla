@@ -254,10 +254,7 @@ class CarlaEnv(gym.Env):
         r_center = max(0.0, 1.0 - (cte / self._DISTANCE_TO_CENTERLINE_THRESHOLD) ** 2)
 
         # ----------------------------------------------------------------
-        # 4. HEADING — alignment with CURRENT waypoint road direction
-        #    Uses current_waypoint_index (not lookahead) so it correctly
-        #    reflects the immediate road curvature the car is on.
-        #    Only active when moving to avoid misleading stationary signal.
+        # 4. HEADING — alignment with current waypoint road direction
         # ----------------------------------------------------------------
         if speed_kmh > 2.0:
             target_wp = self.route_waypoints[self.current_waypoint_index]
@@ -272,36 +269,34 @@ class CarlaEnv(gym.Env):
 
         # ----------------------------------------------------------------
         # 5. CONTINUOUS DRIVING — additive, gated by speed
-        #    Scaled to zero when barely moving so stationary car
-        #    earns no driving reward
+        #    r_center appears here only once (removed stability_gate that
+        #    double-penalized centerline deviation).
         # ----------------------------------------------------------------
-        stability_gate = 0.5 + 0.5 * r_center
         r_driving = (
             0.3 * r_speed
             + 0.4 * r_center
             + 0.3 * r_heading
-        ) * min(1.0, speed_kmh / 5.0) * stability_gate
+        ) * min(1.0, speed_kmh / 5.0)
 
         # ----------------------------------------------------------------
-        # 6. CONTROL REGULARIZATION — MPC-style
-        #    (a) penalize large steering/throttle
-        #    (b) penalize changes in steering/throttle
+        # 6. CONTROL REGULARIZATION
+        #    (a) Steering magnitude — mild penalty, doesn't prevent sharp turns
+        #    (b) Control rate — penalize jerky changes (main smoothness signal)
+        #    NOTE: throttle magnitude penalty removed — it created incentive
+        #    to coast, conflicting with speed reward.
         # ----------------------------------------------------------------
-        steer = float(action[0])
-        throttle_cmd = float((action[1] + 1) / 2)   # same mapping used in step()
+        steer        = float(action[0])
+        throttle_cmd = float((action[1] + 1) / 2)
 
-        # A) control magnitude penalty: discourage aggressive actions
-        r_ctrl_mag = (
-            -0.05 * (steer ** 2)
-            -0.02 * (throttle_cmd ** 2)
-        )
+        # (a) Steering magnitude — gentle, allows sharp turns when needed
+        r_ctrl_mag = -0.01 * (steer ** 2)
 
-        # B) control rate penalty: discourage oscillation / jerk
+        # (b) Control rate — main smoothness penalty
         if self.prev_action is not None:
-            prev_steer = float(self.prev_action[0])
+            prev_steer        = float(self.prev_action[0])
             prev_throttle_cmd = float((self.prev_action[1] + 1) / 2)
 
-            delta_steer = steer - prev_steer
+            delta_steer    = steer - prev_steer
             delta_throttle = throttle_cmd - prev_throttle_cmd
 
             r_ctrl_rate = (
