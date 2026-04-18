@@ -52,7 +52,9 @@ def show_reconstruction_windows(obs, deter, stoch, rssm, decoder) -> bool:
 # Model loading
 # =============================================================================
 
-def build_models(model_path: str = CKPT_PATH):
+def build_models(model_dir: str = CKPT_DIR, model_name: str = TEST_MODEL):
+    model_path = f"{model_dir}/{model_name}"
+    print(f"Loading models from {model_path}...")
     Z_DIM = STOCH_CATEGORICALS * STOCH_CLASSES
 
     encoder = MultiModalEncoder(embed_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)

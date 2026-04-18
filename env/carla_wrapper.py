@@ -109,24 +109,67 @@ class CarlaEnv(gym.Env):
 
         return obs, float(reward), terminated, truncated, {}
 
+    # John's idea: use longitudinal projection to update waypoints, with two conditions:
     def _check_waypoint_completion(self):
         """
-        Advance waypoint index when car is within 1.5m of current target.
-        1.5m threshold with 2.0m waypoint spacing avoids accidentally
-        triggering the next waypoint while still at the current one.
+        Waypoint update with longitudinal projection.
+
+        Two conditions to advance the waypoint index:
+          1. Car enters radius R (1.5m) around the waypoint → advance + give reward
+          2. Car passes the waypoint longitudinally (even if it missed the radius)
+             → advance silently, no reward
+
+        Condition 2 prevents the car from getting stuck chasing a waypoint
+        it has already driven past, which would cause incorrect heading rewards
+        and a stale goal vector.
+
+        Diagram:
+          prev_wp ----[target_wp]---- next_wp
+                           |
+                      blue line (perpendicular to route)
+                      green circle (radius R=1.5m)
+
+          If car crosses blue line → advance (no reward)
+          If car enters green circle → advance + reward
+          R > crossing threshold so reward requires actually being close
         """
         self.waypoint_reward = 0.0
 
         if self.current_waypoint_index >= len(self.route_waypoints) - 1:
             return
 
-        target_loc = self.route_waypoints[self.current_waypoint_index].transform.location
+        target_loc  = self.route_waypoints[self.current_waypoint_index].transform.location
         vehicle_loc = self.vehicle.get_location()
-        dist = vehicle_loc.distance(target_loc)
 
-        if dist < 1.5:
+        # Vector from target waypoint to vehicle
+        t2v = vehicle_loc - target_loc
+
+        # --- Condition 1: Car is within reward radius ---
+        if t2v.length() < 1.5:
             self.current_waypoint_index += 1
             self.waypoint_reward = 1.0
+            return
+
+        # --- Condition 2: Car has passed the waypoint longitudinally ---
+        # Only check if there is a previous waypoint to define the route direction
+        if self.current_waypoint_index > 0:
+            prev_loc = self.route_waypoints[self.current_waypoint_index - 1].transform.location
+
+            # Vector from target waypoint back toward previous waypoint
+            # This defines the "incoming route direction"
+            t2p = prev_loc - target_loc
+            t2p_len = t2p.length() + 1e-6  # avoid division by zero
+
+            # Project t2v onto t2p (longitudinal component)
+            # Positive scl means vehicle is on the far side of target
+            # (i.e. has passed it in the route direction)
+            scl = (t2p.x * t2v.x + t2p.y * t2v.y + t2p.z * t2v.z) / t2p_len
+
+            # scl < 1.0 means vehicle is up to 1m past the waypoint longitudinally
+            # Threshold of 1.0m is robust at typical driving speeds (25 km/h → 0.35m/tick)
+            if scl < 1.0:
+                self.current_waypoint_index += 1
+                # No reward — car missed the radius, just advance to keep goal consistent
 
     def _get_obs(self):
         player_transform = self.vehicle.get_transform()

@@ -9,16 +9,17 @@ from params import (
 )
 from env.carla_wrapper import CarlaEnv, GOAL_LOOKAHEAD
 
+# Maximum steps per episode before forcing a reset.
+# At 0.05s per step, 1000 steps = 50 seconds of driving.
+# This ensures variety of spawn locations and avoids driving in circles.
+MAX_EPISODE_STEPS = 1000
+
 
 def compute_expert_action(env) -> np.ndarray:
     """
     Pure pursuit expert controller.
     Uses COLLECT_LOOKAHEAD waypoints ahead for smooth steering.
-    COLLECT_LOOKAHEAD should match GOAL_LOOKAHEAD in carla_wrapper.py
-    so that collected goal vectors correspond to where the expert steers.
-
-    Currently: COLLECT_LOOKAHEAD == GOAL_LOOKAHEAD == 3
-    (3 waypoints × 2.0m = 6m lookahead)
+    COLLECT_LOOKAHEAD must match GOAL_LOOKAHEAD in carla_wrapper.py.
     """
     assert COLLECT_LOOKAHEAD == GOAL_LOOKAHEAD, (
         f"COLLECT_LOOKAHEAD ({COLLECT_LOOKAHEAD}) must match "
@@ -79,12 +80,16 @@ def run_collection():
     env    = CarlaEnv()
     obs, _ = env.reset()
     seq    = empty_seq()
-    seq_saved = 0
+    seq_saved    = 0
+    episode_step = 0
+    episode_num  = 1
 
     print(f"Starting data collection — target: {COLLECT_TARGET_STEPS} steps, "
           f"seq_len: {SEQ_LEN}")
     print(f"  COLLECT_LOOKAHEAD: {COLLECT_LOOKAHEAD} waypoints "
           f"({COLLECT_LOOKAHEAD * 2.0:.1f}m ahead)")
+    print(f"  MAX_EPISODE_STEPS: {MAX_EPISODE_STEPS} "
+          f"({MAX_EPISODE_STEPS * 0.05:.0f}s per episode)")
     print(f"  depth shape:    {obs['depth'].shape}")
     print(f"  semantic shape: {obs['semantic'].shape}")
     print(f"  goal shape:     {obs['goal'].shape}  (normalized /10.0)")
@@ -103,7 +108,20 @@ def run_collection():
         ))
 
         next_obs, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
+        episode_step += 1
+
+        # Determine if we should reset:
+        # 1. Natural termination (collision, off-road, stuck) — mark done=True
+        # 2. Time limit hit — mark done=False (not a real episode end,
+        #    just a forced respawn for variety)
+        natural_done  = terminated or truncated
+        time_limit_hit = episode_step >= MAX_EPISODE_STEPS
+        should_reset  = natural_done or time_limit_hit
+
+        # done signal stored in buffer:
+        # True  → model learns this is a genuine episode boundary
+        # False → model treats next episode as continuation (correct for time limit)
+        done_for_buffer = natural_done  # NOT time_limit_hit
 
         # Accumulate transition — obs from BEFORE the step
         seq["depth"].append(obs["depth"])
@@ -112,7 +130,7 @@ def run_collection():
         seq["vector"].append(obs["vector"])
         seq["action"].append(action)
         seq["reward"].append(reward)
-        seq["done"].append(done)
+        seq["done"].append(done_for_buffer)
 
         # Flush complete sequence to disk
         if len(seq["action"]) == SEQ_LEN:
@@ -124,15 +142,22 @@ def run_collection():
 
         if (step + 1) % COLLECT_LOG_EVERY == 0:
             print(f"  Step {step + 1:>6}/{COLLECT_TARGET_STEPS} | "
+                  f"Ep: {episode_num} | "
+                  f"Ep step: {episode_step}/{MAX_EPISODE_STEPS} | "
                   f"Seqs saved: {seq_saved} | "
                   f"Reward: {reward:.2f}")
 
-        if done:
-            print(f"  Episode ended at step {step + 1}. Resetting...")
+        if should_reset:
+            reason = "natural termination" if natural_done else "time limit"
+            print(f"  Episode {episode_num} ended at step {step + 1} "
+                  f"({reason}, ep_steps={episode_step}). Resetting...")
             obs, _ = env.reset()
-            seq = empty_seq()   # discard incomplete sequence at episode boundary
+            seq    = empty_seq()   # discard incomplete sequence at episode boundary
+            episode_step = 0
+            episode_num += 1
 
     print(f"\nCollection complete — {seq_saved} sequences saved to {COLLECT_SAVE_DIR}")
+    print(f"  Total episodes: {episode_num}")
     env._cleanup()
 
 

@@ -446,6 +446,14 @@ def actor_critic_step(rssm_out, rssm, reward_head, cont_head, actor, critic,
             target_v = symexp(
                 twohot.mean(target_critic(all_deter_f, all_stoch_f, goal_h1))
             ).view(B, IMAG_HORIZON + 1, 1)
+            
+        # DEBUG: log some diagnostics about the imagined rewards, discounts, and target values
+        if torch.rand(1).item() < 0.01:  # print ~1% of the time to avoid spam
+            print(f"[DIAG] imag_reward mean: {imag_reward.mean().item():.3f}, "
+                f"sum: {imag_reward.sum(dim=1).mean().item():.3f}")
+            print(f"[DIAG] discounts mean: {discounts.mean().item():.3f}")
+            print(f"[DIAG] target_v mean: {target_v.mean().item():.3f}, "
+                f"bootstrap: {target_v[:, -1].mean().item():.3f}")
 
         v = symexp(
             twohot.mean(critic(all_deter_f, all_stoch_f, goal_h1))
@@ -455,6 +463,11 @@ def actor_critic_step(rssm_out, rssm, reward_head, cont_head, actor, critic,
             reward=imag_reward, value=target_v[:, :-1], discount=discounts,
             lam=LAMBDA, bootstrap=target_v[:, -1], time_major=False,
         )
+        
+        # DEBUG: log the mean of the returns to check for reasonable magnitudes and to detect potential issues like exploding values
+        if torch.rand(1).item() < 0.01:
+            print(f"[DIAG] returns mean: {returns.mean().item():.3f}")
+        
         weights = torch.cumprod(
             torch.cat([torch.ones(B, 1, 1, device=DEVICE), discounts[:, :-1]], dim=1), dim=1
         )
