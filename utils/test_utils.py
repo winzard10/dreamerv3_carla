@@ -140,7 +140,7 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
                     deter, stoch, prev_action, embed, goal
                 )
                 action, _, _, _ = actor(
-                    deter, rssm.flatten_stoch(stoch), goal, prev_action, sample=False
+                    deter, rssm.flatten_stoch(stoch), goal, sample=False
                 )
                 prev_action = action.detach()
 

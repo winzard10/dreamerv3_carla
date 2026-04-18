@@ -289,7 +289,7 @@ class CarlaEnv(gym.Env):
         throttle_cmd = float((action[1] + 1) / 2)
 
         # (a) Steering magnitude — gentle, allows sharp turns when needed
-        r_ctrl_mag = -0.01 * (steer ** 2)
+        r_ctrl_mag = -0.00 * (steer ** 2) # 0.01
 
         # (b) Control rate — main smoothness penalty
         if self.prev_action is not None:
@@ -300,8 +300,8 @@ class CarlaEnv(gym.Env):
             delta_throttle = throttle_cmd - prev_throttle_cmd
 
             r_ctrl_rate = (
-                -0.15 * (delta_steer ** 2)
-                -0.05 * (delta_throttle ** 2)
+                -0.00 * (delta_steer ** 2) # 0.15
+                -0.00 * (delta_throttle ** 2) # 0.05
             )
         else:
             r_ctrl_rate = 0.0

@@ -187,8 +187,7 @@ def main():
                 embed = encoder(depth_in, sem_ids, vec_in, goal_in)
                 prev_deter, prev_stoch, _, _ = rssm.obs_step(prev_deter, prev_stoch, prev_action, embed, goal_in)
                 action_th, _, _, _ = actor(
-                    prev_deter, rssm.flatten_stoch(prev_stoch), goal_in,
-                    prev_action, sample=True
+                    prev_deter, rssm.flatten_stoch(prev_stoch), goal_in, sample=True
                 )
 
             act_np = action_th.cpu().numpy()[0]
@@ -247,7 +246,6 @@ def main():
                             rssm_out["deter_seq"][:, -1].detach(),
                             rssm_out["stoch_seq"][:, -1].detach(),
                             rssm_out["goals_seq"][:, -1].detach(),
-                            rssm_out["prev_actions_seq"][:, -1].detach(),
                             horizon=IMAG_LOG_HORIZON,
                             tag_prefix="Visuals_B",
                             num_examples=IMAG_LOG_EXAMPLES,

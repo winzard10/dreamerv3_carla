@@ -247,7 +247,7 @@ def log_dataset_action_rollout(writer, global_step, rssm, decoder,
 @torch.no_grad()
 def log_imagination_rollout(
     writer, global_step, rssm, decoder, actor,
-    start_deter, start_stoch, start_goal, start_prev_action,  # ← new
+    start_deter, start_stoch, start_goal,
     horizon, tag_prefix, num_examples,
 ):
     rssm.eval(); decoder.eval(); actor.eval()
@@ -255,20 +255,18 @@ def log_imagination_rollout(
         B = start_deter.shape[0]
         deter = start_deter
         stoch = start_stoch
-        prev_action = start_prev_action
         goal = start_goal
         deters, logits_seq = [deter], []
 
         for _ in range(horizon):
             stoch_flat = rssm.flatten_stoch(stoch)
-            action, _, _, _ = actor(deter, stoch_flat, goal, prev_action, sample=False)
+            action, _, _, _ = actor(deter, stoch_flat, goal, sample=False)
             deter, stoch, logits_flat = rssm.img_step(deter, stoch, action, goal)
 
             deters.append(deter)
             logits_seq.append(logits_flat)
-            prev_action = action
 
-        deters          = torch.stack(deters, dim=1)
+        deters = torch.stack(deters, dim=1)
         prior_logits_bt = torch.stack(logits_seq, dim=1)
 
         _, rollout_probs, _ = rssm.dist_from_logits_flat(
@@ -431,14 +429,7 @@ def actor_critic_step(rssm_out, rssm, reward_head, cont_head, actor, critic,
         for p in critic.parameters():
             p.requires_grad_(False)
 
-        # Before the imagine call:
-        start_prev_action = rssm_out["actions_seq"][:, -1].detach()  # [B, action_dim]
-
-        imag = rssm.imagine(
-            start_deter, start_stoch, actor, goal0,
-            start_prev_action=start_prev_action,
-            horizon=IMAG_HORIZON,
-        )
+        imag = rssm.imagine(start_deter, start_stoch, actor, goal0, horizon=IMAG_HORIZON)
 
         Bh      = B * IMAG_HORIZON
         Bh1     = B * (IMAG_HORIZON + 1)
