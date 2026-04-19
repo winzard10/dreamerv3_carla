@@ -34,7 +34,7 @@ def show_reconstruction_windows(obs, deter, stoch, rssm, decoder) -> bool:
     """
     with torch.no_grad():
         stoch_flat = rssm.flatten_stoch(stoch)
-        recon_depth, recon_segm_logits = decoder(deter, stoch_flat)
+        recon_depth, recon_segm_logits, _, _ = decoder(deter, stoch_flat)
 
     gt_depth = obs["depth"][:, :, 0].astype(np.uint8)
     gt_segm  = obs["semantic"][:, :, 0].astype(np.uint8)

@@ -17,6 +17,7 @@ from utils.train_utils import (
 )
 from utils.buffer import SequenceBuffer
 from utils.twohot import TwoHotDist
+from utils.test_utils import show_reconstruction_windows
 
 from models.encoder import MultiModalEncoder
 from models.rssm import RSSM
@@ -165,6 +166,8 @@ def main():
     env       = CarlaEnv()
     spectator = env.world.get_spectator()
 
+    keep_showing = SHOW_RECON   # Stream reconstruction images?
+
     fixed_rssm_out_B = None
     for episode in range(ckpt.get("episode", 0) + 1, PART_B_EPISODE + 1):
         obs, _         = env.reset()
@@ -205,6 +208,11 @@ def main():
             episode_reward += reward
             obs         = next_obs
             prev_action = action_th.detach()
+
+            # Show reconstructed images
+            if keep_showing and step % SHOW_EVERY_N_STEPS == 0:
+                keep_showing = show_reconstruction_windows(obs, prev_deter, prev_stoch, rssm, decoder)
+
             global_step += 1
 
             # Model updates
