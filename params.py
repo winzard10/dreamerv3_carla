@@ -56,7 +56,7 @@ CKPT_DIR        = "checkpoints/dreamerv3"
 CKPT_PATH       = "checkpoints/dreamerv3/dreamerv3_latest.pth"
 
 # Logging
-IMAG_LOG_EVERY            = 100
+IMAG_LOG_EVERY            = 20     #100
 IMAG_LOG_HORIZON          = 10
 IMAG_LOG_EXAMPLES         = 4
 FIXED_VAL_ENABLED         = True

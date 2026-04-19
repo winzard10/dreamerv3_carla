@@ -2,6 +2,8 @@
 import os
 import torch
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import numpy as np
 
 from params import (
     DEVICE, H, W, NUM_CLASSES,
@@ -271,9 +273,10 @@ def log_imagination_rollout(writer, global_step, rssm, decoder, actor,
             rollout_probs.reshape(B, horizon, -1),
         ], dim=1).reshape(B * (horizon + 1), -1)
 
-        recon_depth, sem_logits, _, _ = decoder(
+        recon_depth, sem_logits, recon_goal, recon_vector = decoder(
             deters.reshape(B * (horizon + 1), -1), all_stoch
         )
+        # make images for recon depth & sem
         recon_depth = recon_depth.view(B, horizon + 1, 1, H, W)
         sem_pred    = torch.argmax(sem_logits, dim=1).view(B, horizon + 1, H, W)
 
@@ -281,8 +284,32 @@ def log_imagination_rollout(writer, global_step, rssm, decoder, actor,
         depth_panel = torch.cat([make_strip(recon_depth[i]) for i in range(n)], dim=1)
         sem_panel   = torch.cat([make_strip(semantic_to_vis(sem_pred[i])) for i in range(n)], dim=1)
 
+        # make figures for recon goal
+        # print("actual goal")
+        # print(goal0.detach().cpu().numpy())
+        # print("imagined goal")
+        # print(recon_goal.detach().cpu().numpy())
+        recon_goal = recon_goal.view(B, horizon + 1 , -1)
+        # print(recon_goal.shape)
+
+        _H = horizon + 1
+        goal_fig, axs = plt.subplots(B, _H, figsize=(11, 4), sharex=True, sharey=True)
+        for b in range(B):
+            # draw actual goal at begining of imagination
+            axs[b,0].scatter(goal0[b,0].item(), goal0[b,0].item(), c='blue', marker='o')
+            # format axis
+            axs[b,0].set_xlim(0, 0.4)
+            axs[b,0].set_xticks(np.arange(0, 0.4+0.01, 0.1))
+            axs[b,0].set_ylim(-0.2, 0.2)
+            axs[b,0].set_yticks(np.arange(-0.2, 0.2+0.01, 0.1))
+            for t in range(_H):
+                # draw recon goal
+                axs[b,t].scatter(recon_goal[b,t,0].item(), recon_goal[b,t,1].item(), c='red', marker='x')
+                
+
         writer.add_image(f"{tag_prefix}/Imagined_Depth",    depth_panel, global_step)
         writer.add_image(f"{tag_prefix}/Imagined_Semantic", sem_panel,   global_step)
+        writer.add_figure(f"{tag_prefix}/Imagined_Goal",    goal_fig,    global_step)
     finally:
         rssm.train(); decoder.train(); actor.train()
 
