@@ -1,76 +1,80 @@
 import os
+import re
 import pandas as pd
 import matplotlib.pyplot as plt
 from tensorboard.backend.event_processing import event_accumulator
+from tqdm import tqdm
+from params import PHASE_A_STEPS
 
-def find_event_dirs(root):
-    event_dirs = []
-    for dirpath, _, filenames in os.walk(root):
-        if any("tfevents" in f for f in filenames):
-            event_dirs.append(dirpath)
-    return sorted(set(event_dirs))
+RUN_DIR = "./runs/dreamerv3_carla"
+OUTPUT_DIR = "./plots/dreamerv3_carla"
+SMOOTH_WINDOW = 10
+
+
+def clean_tag_name(tag: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", tag)
+
+
+def get_xlabel(tag: str) -> str:
+    tag_l = tag.lower()
+    if "episode_reward" in tag_l or tag_l.endswith("episode_reward"):
+        return "Episode"
+    return "Step"
+
 
 def export_one_run(run_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
     ea = event_accumulator.EventAccumulator(
         run_dir,
-        size_guidance={"scalars": 0},  # load all scalars
+        size_guidance={"scalars": 5000},
     )
+    print("Loading TensorBoard data... (this may take a while)")
     ea.Reload()
+    print("Done.")
 
     tags = ea.Tags().get("scalars", [])
     if not tags:
         print(f"[WARN] No scalar tags found in {run_dir}")
         return
 
-    print(f"\nRun: {run_dir}")
-    print(f"Found tags: {tags}")
+    print(f"Run: {run_dir}")
+    print(f"Found {len(tags)} scalar tags")
 
-    for tag in tags:
+    for tag in tqdm(tags, desc="Processing tags"):
         events = ea.Scalars(tag)
         if not events:
             continue
 
-        data = pd.DataFrame([(e.step, e.value) for e in events], columns=["Step", "Value"])
+        data = pd.DataFrame(
+            [(e.step, e.value) for e in events],
+            columns=["Step", "Value"]
+        )
+
+        data = data.groupby("Step", as_index=False).last().sort_values("Step")
 
         plt.figure(figsize=(10, 6))
         plt.plot(data["Step"], data["Value"], alpha=0.3, label="Raw")
 
-        window = min(10, len(data))
+        window = min(SMOOTH_WINDOW, len(data))
         data["Smoothed"] = data["Value"].rolling(window=window, min_periods=1).mean()
         plt.plot(data["Step"], data["Smoothed"], linewidth=2, label=f"Smoothed({window})")
 
-        clean_name = tag.replace("/", "_")
+        plt.axvline(PHASE_A_STEPS, linestyle="--", color="black", linewidth=1.5, label="Phase A → B")
+
         plt.title(f"DreamerV3 Training: {tag}", fontsize=14)
-
-        tag_l = tag.lower()
-        if tag_l.startswith("pretrain/"):
-            plt.xlabel("Training Step", fontsize=12)
-        elif "episode_reward" in tag_l or tag_l.endswith("episode_reward"):
-            plt.xlabel("Episode", fontsize=12)
-        else:
-            plt.xlabel("Step", fontsize=12)
-
+        plt.xlabel(get_xlabel(tag), fontsize=12)
         plt.ylabel("Value", fontsize=12)
         plt.grid(True, linestyle="--", alpha=0.6)
         plt.legend()
 
+        clean_name = clean_tag_name(tag)
         out_path = os.path.join(output_dir, f"{clean_name}.png")
-        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.savefig(out_path, dpi=180, bbox_inches="tight")
         plt.close()
+
         print(f"Saved: {out_path}")
 
-def export_tb_to_plots(log_root, output_root="./plots"):
-    run_dirs = find_event_dirs(log_root)
-    if not run_dirs:
-        print(f"[ERROR] No tfevents files found under: {log_root}")
-        return
-
-    for run_dir in run_dirs:
-        run_name = os.path.relpath(run_dir, log_root).replace(os.sep, "_")
-        out_dir = os.path.join(output_root, run_name)
-        export_one_run(run_dir, out_dir)
 
 if __name__ == "__main__":
-    export_tb_to_plots("./runs/dreamerv3_carla")
+    export_one_run(RUN_DIR, OUTPUT_DIR)

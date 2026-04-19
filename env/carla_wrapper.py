@@ -1,5 +1,6 @@
 import time
 import carla
+from cv2.gapi import threshold
 import numpy as np
 import random
 import gymnasium as gym
@@ -259,7 +260,8 @@ class CarlaEnv(gym.Env):
         # ----------------------------------------------------------------
         # 3. CENTERLINE — quadratic falloff, smooth near center
         # ----------------------------------------------------------------
-        r_center = max(0.0, 1.0 - (cte / self._DISTANCE_TO_CENTERLINE_THRESHOLD) ** 2)
+        threshold = self._get_centerline_threshold()
+        r_center = max(0.0, 1.0 - (cte / threshold) ** 2)
 
         # ----------------------------------------------------------------
         # 4. HEADING — alignment with current waypoint road direction
@@ -297,7 +299,7 @@ class CarlaEnv(gym.Env):
 
         # (a) Steering magnitude — gentle, allows sharp turns when needed
         r_ctrl_mag = (-0.002 * (steer ** 2) 
-                    - 0.10 * (throttle_cmd ** 2)) 
+                    - 0.08 * (throttle_cmd ** 2)) 
 
         # (b) Control rate — main smoothness penalty
         if self.prev_action is not None:
@@ -356,7 +358,8 @@ class CarlaEnv(gym.Env):
         speed = 3.6 * np.sqrt(v.x**2 + v.y**2 + v.z**2)
         self.stuck_ticks = self.stuck_ticks + 1 if speed < 1.0 else 0
 
-        if self.stuck_ticks > 100 or self._get_dist_to_centerline() > self._DISTANCE_TO_CENTERLINE_THRESHOLD:
+        threshold = self._get_centerline_threshold()
+        if self.stuck_ticks > 100 or self._get_dist_to_centerline() > threshold:
             return True
 
         return False
@@ -399,6 +402,30 @@ class CarlaEnv(gym.Env):
 
     def _on_collision(self, event):
         self.collision_hist.append(event)
+        
+    def _get_centerline_threshold(self):
+        """
+        Dynamic threshold based on lane width.
+
+        Uses 10% margin on half lane width.
+        Fallback to 1.1 * 1.8 if invalid.
+        """
+        try:
+            if self.current_waypoint_index < len(self.route_waypoints):
+                wp = self.route_waypoints[self.current_waypoint_index]
+            else:
+                wp = self.route_waypoints[-1]
+
+            lane_width = float(wp.lane_width)
+
+            if not np.isfinite(lane_width) or lane_width <= 0:
+                raise ValueError
+
+            half_width = lane_width / 2.0
+            return 1.1 * half_width
+
+        except:
+            return 1.1 * 1.8  # fallback
 
     def _process_depth(self, image):
         image.convert(carla.ColorConverter.LogarithmicDepth)

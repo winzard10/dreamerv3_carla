@@ -262,6 +262,7 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
             f"Dist: {total_dist:.1f}m | "
             f"Avg Speed: {np.mean(ep_speeds):.1f} km/h | "
             f"Avg Reward: {np.mean(ep_rewards):.2f}"
+            f"Total Reward: {np.sum(ep_rewards):.2f} | "
         )
         if DETAILED_LOGGING:
             print(
