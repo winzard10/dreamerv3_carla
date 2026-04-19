@@ -2,6 +2,8 @@
 import os
 import torch
 import torch.nn.functional as F
+import numpy as np
+import cv2
 
 from params import (
     DEVICE, H, W, NUM_CLASSES,
@@ -58,9 +60,39 @@ def make_strip(images: torch.Tensor) -> torch.Tensor:
         images = images.squeeze(1)
     return torch.cat(list(images), dim=-1).unsqueeze(0)
 
+def make_color_strip(sem_seq: torch.Tensor) -> torch.Tensor:
+    """
+    sem_seq: [T, H, W]
+    returns: [3, H, T*W]
+    """
+    frames = [semantic_to_color_tensor(sem_seq[t]) for t in range(sem_seq.shape[0])]
+    return torch.cat(frames, dim=2)
 
-def semantic_to_vis(sem_ids: torch.Tensor) -> torch.Tensor:
-    return sem_ids.float() / float(NUM_CLASSES - 1)
+
+def colorize_segmentation(sem_ids: np.ndarray, num_classes: int = NUM_CLASSES) -> np.ndarray:
+    rng = np.random.default_rng(0)
+    colors = rng.integers(0, 255, size=(num_classes, 3), dtype=np.uint8)
+    colors[0] = np.array([0, 0, 0], dtype=np.uint8)
+    sem_ids = np.clip(sem_ids, 0, num_classes - 1)
+    return colors[sem_ids]
+
+
+def semantic_to_color_tensor(sem_ids: torch.Tensor) -> torch.Tensor:
+    """
+    sem_ids: [H, W] or [1, H, W] torch tensor of class ids
+    returns: [3, H, W] float tensor in [0, 1] for TensorBoard
+    """
+    if sem_ids.ndim == 3 and sem_ids.shape[0] == 1:
+        sem_ids = sem_ids.squeeze(0)
+
+    sem_np = sem_ids.detach().cpu().numpy().astype(np.uint8)
+    color_np = colorize_segmentation(sem_np)  # [H, W, 3], RGB uint8
+
+    # optional no-op cv2 conversion path, only if you want to mirror test_utils style:
+    color_bgr = cv2.cvtColor(color_np, cv2.COLOR_RGB2BGR)
+    color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+
+    return torch.from_numpy(color_rgb).permute(2, 0, 1).float() / 255.0
 
 
 def save_checkpoint(path, models, opts, global_step, episode=None):
@@ -190,11 +222,16 @@ def log_recon_panels(writer, global_step, tag_prefix,
     vis_depth = torch.cat([depth_in[idx:idx+1], post_recon_depth[idx:idx+1], prior_recon_depth[idx:idx+1]], dim=-1)
     writer.add_image(f"{tag_prefix}/Depth_GT_Post_Prior", vis_depth.squeeze(0), global_step)
 
-    t_vis  = (sem_ids[idx:idx+1].float() / (NUM_CLASSES - 1)).unsqueeze(0)
-    po_vis = (torch.argmax(post_sem_logits[idx:idx+1], dim=1).float() / (NUM_CLASSES - 1)).unsqueeze(0)
-    pr_vis = (torch.argmax(prior_sem_logits[idx:idx+1], dim=1).float() / (NUM_CLASSES - 1)).unsqueeze(0)
-    writer.add_image(f"{tag_prefix}/Semantic_GT_Post_Prior",
-                     torch.cat([t_vis, po_vis, pr_vis], dim=-1).squeeze(0), global_step)
+    gt_sem_ids    = sem_ids[idx]
+    post_sem_ids  = torch.argmax(post_sem_logits[idx:idx+1], dim=1)[0]
+    prior_sem_ids = torch.argmax(prior_sem_logits[idx:idx+1], dim=1)[0]
+
+    t_vis  = semantic_to_color_tensor(gt_sem_ids)      # [3, H, W]
+    po_vis = semantic_to_color_tensor(post_sem_ids)    # [3, H, W]
+    pr_vis = semantic_to_color_tensor(prior_sem_ids)   # [3, H, W]
+
+    sem_panel = torch.cat([t_vis, po_vis, pr_vis], dim=2)  # concatenate along width
+    writer.add_image(f"{tag_prefix}/Semantic_GT_Post_Prior", sem_panel, global_step)
 
 
 @torch.no_grad()
@@ -236,7 +273,7 @@ def log_dataset_action_rollout(writer, global_step, rssm, decoder,
 
         n = min(B, num_examples)
         depth_panel = torch.cat([make_strip(recon_depth[i]) for i in range(n)], dim=1)
-        sem_panel   = torch.cat([make_strip(semantic_to_vis(sem_pred[i])) for i in range(n)], dim=1)
+        sem_panel = torch.cat([make_color_strip(sem_pred[i]) for i in range(n)], dim=1)
 
         writer.add_image(f"{tag_prefix}/DatasetAction_Depth",    depth_panel, global_step)
         writer.add_image(f"{tag_prefix}/DatasetAction_Semantic", sem_panel,   global_step)
@@ -285,7 +322,7 @@ def log_imagination_rollout(
 
         n = min(B, num_examples)
         depth_panel = torch.cat([make_strip(recon_depth[i]) for i in range(n)], dim=1)
-        sem_panel   = torch.cat([make_strip(semantic_to_vis(sem_pred[i])) for i in range(n)], dim=1)
+        sem_panel = torch.cat([make_color_strip(sem_pred[i]) for i in range(n)], dim=1)
 
         writer.add_image(f"{tag_prefix}/Imagined_Depth",    depth_panel, global_step)
         writer.add_image(f"{tag_prefix}/Imagined_Semantic", sem_panel,   global_step)

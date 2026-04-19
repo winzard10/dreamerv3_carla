@@ -10,6 +10,7 @@ from models.rssm import RSSM
 from models.actor_critic import Actor
 from models.decoder import MultiModalDecoder
 
+DETAILED_LOGGING = True
 
 # =============================================================================
 # Visualization
@@ -136,6 +137,8 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
         "r_collision": [],
         "r_offroad": [],
         "r_stall": [],
+        "lane_invasions": [],
+        "coll_per_meter": [],
     }
     keep_showing = SHOW_RECON
 
@@ -157,6 +160,8 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
         ep_r_collision = []
         ep_r_offroad = []
         ep_r_stall = []
+        ep_lane_invasions = []
+        ep_collision_count = 0
 
         total_dist = 0.0
         prev_loc   = env.vehicle.get_location()
@@ -189,6 +194,8 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
 
             obs, reward, terminated, truncated, info = env.step(act_np)
             rc = info.get("reward_components", {})
+            
+            ep_collision_count += (1 if rc.get("r_collision", 0.0) < 0 else 0)
 
             ep_r_progress.append(float(rc.get("r_progress", 0.0)))
             ep_r_speed.append(float(rc.get("r_speed", 0.0)))
@@ -200,6 +207,7 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
             ep_r_collision.append(float(rc.get("r_collision", 0.0)))
             ep_r_offroad.append(float(rc.get("r_offroad", 0.0)))
             ep_r_stall.append(float(rc.get("r_stall", 0.0)))
+            ep_lane_invasions.append(info.get("lane_invasions", 0))
             
             done = terminated or truncated
 
@@ -244,6 +252,10 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
         results["r_collision"].append(float(np.mean(ep_r_collision)) if ep_r_collision else 0.0)
         results["r_offroad"].append(float(np.mean(ep_r_offroad)) if ep_r_offroad else 0.0)
         results["r_stall"].append(float(np.mean(ep_r_stall)) if ep_r_stall else 0.0)
+        results["lane_invasions"].append(ep_lane_invasions[-1] if ep_lane_invasions else 0)
+        
+        coll_per_m = ep_collision_count / (total_dist + 1e-6)
+        results["coll_per_meter"].append(coll_per_m)
 
         print(
             f"  Ep {ep + 1} | "
@@ -251,32 +263,32 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
             f"Avg Speed: {np.mean(ep_speeds):.1f} km/h | "
             f"Avg Reward: {np.mean(ep_rewards):.2f}"
         )
-        print(
-            f"     steer mean/std: {steer_mean:.3f} / {steer_std:.3f} | "
-            f"throttle mean/std: {throttle_mean:.3f} / {throttle_std:.3f}"
-        )
-        print(f"     first 20 steer: {np.round(np.array(ep_steers[:20]), 3).tolist()}")
-        print(f"     first 20 throttle: {np.round(np.array(ep_throttles[:20]), 3).tolist()}")
-        print(
-            f"     reward parts avg | "
-            f"progress: {np.mean(ep_r_progress):.3f}, "
-            f"speed: {np.mean(ep_r_speed):.3f}, "
-            f"center: {np.mean(ep_r_center):.3f}, "
-            f"heading: {np.mean(ep_r_heading):.3f}, "
-            f"driving: {np.mean(ep_r_driving):.3f}"
-        )
-        print(
-            f"     control avg     | "
-            f"ctrl_mag: {np.mean(ep_r_ctrl_mag):.3f}, "
-            f"ctrl_rate: {np.mean(ep_r_ctrl_rate):.3f}"
-        )
-        print(
-            f"     hard penalties  | "
-            f"collision: {np.mean(ep_r_collision):.3f}, "
-            f"offroad: {np.mean(ep_r_offroad):.3f}, "
-            f"stall: {np.mean(ep_r_stall):.3f}"
-        )
-
+        if DETAILED_LOGGING:
+            print(
+                f"     steer mean/std: {steer_mean:.3f} / {steer_std:.3f} | "
+                f"throttle mean/std: {throttle_mean:.3f} / {throttle_std:.3f}"
+            )
+            print(f"     first 20 steer: {np.round(np.array(ep_steers[:20]), 3).tolist()}")
+            print(f"     first 20 throttle: {np.round(np.array(ep_throttles[:20]), 3).tolist()}")
+            print(
+                f"     reward parts avg | "
+                f"progress: {np.mean(ep_r_progress):.3f}, "
+                f"speed: {np.mean(ep_r_speed):.3f}, "
+                f"center: {np.mean(ep_r_center):.3f}, "
+                f"heading: {np.mean(ep_r_heading):.3f}, "
+                f"driving: {np.mean(ep_r_driving):.3f}"
+            )
+            print(
+                f"     control avg     | "
+                f"ctrl_mag: {np.mean(ep_r_ctrl_mag):.3f}, "
+                f"ctrl_rate: {np.mean(ep_r_ctrl_rate):.3f}"
+            )
+            print(
+                f"     hard penalties  | "
+                f"collision: {np.mean(ep_r_collision):.3f}, "
+                f"offroad: {np.mean(ep_r_offroad):.3f}, "
+                f"stall: {np.mean(ep_r_stall):.3f}"
+            )
     return results
 
 
@@ -284,10 +296,74 @@ def print_report(final_report: dict):
     print("\n" + "=" * 40)
     print("EVALUATION REPORT")
     print("=" * 40)
+
+    # collect for global stats
+    all_metrics = {
+        "speeds": [],
+        "center_distances": [],
+        "travel_distances": [],
+        "rewards": [],
+        "lane_invasions": [],
+        "coll_per_meter": [],
+        "steer_means": [],
+        "steer_stds": [],
+        "throttle_means": [],
+        "throttle_stds": [],
+    }
+
     for town_name, metrics in final_report.items():
         print(f"[{town_name}]")
-        print(f"  Avg Speed:           {np.mean(metrics['speeds']):.2f} km/h")
-        print(f"  Avg Center Distance: {np.mean(metrics['center_distances']):.2f} m")
-        print(f"  Avg Travel Dist:     {np.mean(metrics['travel_distances']):.2f} m")
-        print(f"  Avg Episode Reward:  {np.mean(metrics['rewards']):.2f}")
-        print("-" * 20)
+
+        def mean_std(x):
+            return np.mean(x), np.std(x)
+
+        sp_m, sp_s = mean_std(metrics["speeds"])
+        cd_m, cd_s = mean_std(metrics["center_distances"])
+        td_m, td_s = mean_std(metrics["travel_distances"])
+        rw_m, rw_s = mean_std(metrics["rewards"])
+        li_m, li_s = mean_std(metrics["lane_invasions"])
+        cp_m, cp_s = mean_std(metrics["coll_per_meter"])
+
+        st_m, st_s = mean_std(metrics["steer_means"])
+        ststd_m, ststd_s = mean_std(metrics["steer_stds"])
+
+        th_m, th_s = mean_std(metrics["throttle_means"])
+        thstd_m, thstd_s = mean_std(metrics["throttle_stds"])
+
+        print(f"  Avg Speed:           {sp_m:.2f} ± {sp_s:.2f} km/h")
+        print(f"  Center Distance:     {cd_m:.2f} ± {cd_s:.2f} m")
+        print(f"  Travel Distance:     {td_m:.2f} ± {td_s:.2f} m")
+        print(f"  Episode Reward:      {rw_m:.2f} ± {rw_s:.2f}")
+        print(f"  Lane Invasions:      {li_m:.2f} ± {li_s:.2f}")
+        print(f"  Collisions / meter:  {cp_m:.3f} ± {cp_s:.3f}")
+
+        print(f"  Steer mean:          {st_m:.3f} ± {st_s:.3f}")
+        print(f"  Steer std:           {ststd_m:.3f} ± {ststd_s:.3f}")
+        print(f"  Throttle mean:       {th_m:.3f} ± {th_s:.3f}")
+        print(f"  Throttle std:        {thstd_m:.3f} ± {thstd_s:.3f}")
+
+        print("-" * 40)
+
+        # accumulate global
+        for k in all_metrics:
+            all_metrics[k].extend(metrics[k])
+
+    # ===== GLOBAL STATS =====
+    print("\n" + "=" * 40)
+    print("OVERALL (ALL TOWNS)")
+    print("=" * 40)
+
+    def g(x):
+        return np.mean(x), np.std(x)
+
+    print(f"  Avg Speed:           {g(all_metrics['speeds'])[0]:.2f} ± {g(all_metrics['speeds'])[1]:.2f}")
+    print(f"  Center Distance:     {g(all_metrics['center_distances'])[0]:.2f} ± {g(all_metrics['center_distances'])[1]:.2f}")
+    print(f"  Travel Distance:     {g(all_metrics['travel_distances'])[0]:.2f} ± {g(all_metrics['travel_distances'])[1]:.2f}")
+    print(f"  Episode Reward:      {g(all_metrics['rewards'])[0]:.2f} ± {g(all_metrics['rewards'])[1]:.2f}")
+    print(f"  Lane Invasions:      {g(all_metrics['lane_invasions'])[0]:.2f} ± {g(all_metrics['lane_invasions'])[1]:.2f}")
+    print(f"  Collisions / meter:  {g(all_metrics['coll_per_meter'])[0]:.3f} ± {g(all_metrics['coll_per_meter'])[1]:.3f}")
+
+    print(f"  Steer mean:          {g(all_metrics['steer_means'])[0]:.3f} ± {g(all_metrics['steer_means'])[1]:.3f}")
+    print(f"  Steer std:           {g(all_metrics['steer_stds'])[0]:.3f} ± {g(all_metrics['steer_stds'])[1]:.3f}")
+    print(f"  Throttle mean:       {g(all_metrics['throttle_means'])[0]:.3f} ± {g(all_metrics['throttle_means'])[1]:.3f}")
+    print(f"  Throttle std:        {g(all_metrics['throttle_stds'])[0]:.3f} ± {g(all_metrics['throttle_stds'])[1]:.3f}")

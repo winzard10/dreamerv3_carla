@@ -27,6 +27,7 @@ class CarlaEnv(gym.Env):
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0
         self._DISTANCE_TO_CENTERLINE_THRESHOLD = 3.0
+        self.lane_invasion_count = 0
         self.prev_action = None
 
         self.observation_space = spaces.Dict({
@@ -50,6 +51,7 @@ class CarlaEnv(gym.Env):
         self.waypoint_reward = 0.0
         self.prev_action = None
         self.last_reward_components = {}
+        self.lane_invasion_count = 0
 
         settings = self.world.get_settings()
         settings.synchronous_mode = True
@@ -109,7 +111,8 @@ class CarlaEnv(gym.Env):
             self.collision_hist = []
 
         info = {
-            "reward_components": getattr(self, "last_reward_components", {}).copy()
+            "reward_components": getattr(self, "last_reward_components", {}).copy(),
+            "lane_invasions": self.lane_invasion_count
         }
         return obs, float(reward), terminated, truncated, info
 
@@ -277,8 +280,10 @@ class CarlaEnv(gym.Env):
         #    r_center appears here only once (removed stability_gate that
         #    double-penalized centerline deviation).
         # ----------------------------------------------------------------
+        r_center_eff = r_center * r_heading
+
         r_driving = (
-            + 0.5 * r_center
+            0.4 * r_center_eff
             + 0.4 * r_heading
         ) * min(1.0, speed_kmh / 5.0) + 0.1 * r_speed
 
@@ -291,8 +296,8 @@ class CarlaEnv(gym.Env):
         throttle_cmd = float((action[1] + 1) / 2)
 
         # (a) Steering magnitude — gentle, allows sharp turns when needed
-        r_ctrl_mag = (-0.002 * (steer ** 2) # 0.01
-                    - 0.04 * (throttle_cmd ** 2)) # 0.01
+        r_ctrl_mag = (-0.002 * (steer ** 2) 
+                    - 0.10 * (throttle_cmd ** 2)) 
 
         # (b) Control rate — main smoothness penalty
         if self.prev_action is not None:
@@ -303,8 +308,8 @@ class CarlaEnv(gym.Env):
             delta_throttle = throttle_cmd - prev_throttle_cmd
 
             r_ctrl_rate = (
-                -0.02 * (delta_steer ** 2) # 0.15
-                -0.20 * (delta_throttle ** 2) # 0.05
+                -0.05 * (delta_steer ** 2) 
+                -0.30 * (delta_throttle ** 2) 
             )
         else:
             r_ctrl_rate = 0.0
@@ -379,6 +384,18 @@ class CarlaEnv(gym.Env):
         self.col_sensor.listen(lambda event: self._on_collision(event))
         self.sensors.append(self.col_sensor)
         self.collision_hist = []
+        
+        lane_bp = self.blueprint_library.find('sensor.other.lane_invasion')
+        self.lane_sensor = self.world.spawn_actor(
+            lane_bp,
+            carla.Transform(),
+            attach_to=self.vehicle
+        )
+        self.lane_sensor.listen(lambda event: self._on_lane_invasion(event))
+        self.sensors.append(self.lane_sensor)
+
+    def _on_lane_invasion(self, event):
+        self.lane_invasion_count += 1
 
     def _on_collision(self, event):
         self.collision_hist.append(event)
