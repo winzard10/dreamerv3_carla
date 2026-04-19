@@ -49,6 +49,7 @@ class CarlaEnv(gym.Env):
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0
         self.prev_action = None
+        self.last_reward_components = {}
 
         settings = self.world.get_settings()
         settings.synchronous_mode = True
@@ -107,7 +108,10 @@ class CarlaEnv(gym.Env):
         if done:
             self.collision_hist = []
 
-        return obs, float(reward), terminated, truncated, {}
+        info = {
+            "reward_components": getattr(self, "last_reward_components", {}).copy()
+        }
+        return obs, float(reward), terminated, truncated, info
 
     # John's idea: use longitudinal projection to update waypoints, with two conditions:
     def _check_waypoint_completion(self):
@@ -235,18 +239,19 @@ class CarlaEnv(gym.Env):
         # ----------------------------------------------------------------
         # 1. PROGRESS — primary signal, +5 per waypoint reached
         # ----------------------------------------------------------------
-        r_progress = 5.0 if self.waypoint_reward > 0 else 0.0
+        r_progress = 3.0 if self.waypoint_reward > 0 else 0.0
 
         # ----------------------------------------------------------------
         # 2. SPEED — linear ramp to target, gentle penalty above
         # ----------------------------------------------------------------
-        target_speed = 25.0
+        target_speed = 15.0
         if speed_kmh < 1.0:
             r_speed = -0.5
         elif speed_kmh <= target_speed:
             r_speed = speed_kmh / target_speed
         else:
-            r_speed = max(0.0, 1.0 - (speed_kmh - target_speed) / target_speed)
+            r_speed = 1.0 - abs(speed_kmh - target_speed) / 5.0
+            r_speed = max(-1.0, r_speed)
 
         # ----------------------------------------------------------------
         # 3. CENTERLINE — quadratic falloff, smooth near center
@@ -273,10 +278,9 @@ class CarlaEnv(gym.Env):
         #    double-penalized centerline deviation).
         # ----------------------------------------------------------------
         r_driving = (
-            0.3 * r_speed
-            + 0.4 * r_center
-            + 0.3 * r_heading
-        ) * min(1.0, speed_kmh / 5.0)
+            + 0.5 * r_center
+            + 0.4 * r_heading
+        ) * min(1.0, speed_kmh / 5.0) + 0.1 * r_speed
 
         # ----------------------------------------------------------------
         # 6. CONTROL REGULARIZATION
@@ -287,8 +291,8 @@ class CarlaEnv(gym.Env):
         throttle_cmd = float((action[1] + 1) / 2)
 
         # (a) Steering magnitude — gentle, allows sharp turns when needed
-        r_ctrl_mag = (-0.000 * (steer ** 2) # 0.01
-                    - 0.00 * (throttle_cmd ** 2)) # 0.01
+        r_ctrl_mag = (-0.002 * (steer ** 2) # 0.01
+                    - 0.04 * (throttle_cmd ** 2)) # 0.01
 
         # (b) Control rate — main smoothness penalty
         if self.prev_action is not None:
@@ -299,8 +303,8 @@ class CarlaEnv(gym.Env):
             delta_throttle = throttle_cmd - prev_throttle_cmd
 
             r_ctrl_rate = (
-                -0.00 * (delta_steer ** 2) # 0.15
-                -0.00 * (delta_throttle ** 2) # 0.05
+                -0.02 * (delta_steer ** 2) # 0.15
+                -0.20 * (delta_throttle ** 2) # 0.05
             )
         else:
             r_ctrl_rate = 0.0
@@ -313,6 +317,19 @@ class CarlaEnv(gym.Env):
         r_stall     = -5.0  if self.stuck_ticks >= 100 else 0.0
 
         self.prev_action = np.array(action, dtype=np.float32)
+        
+        self.last_reward_components = {
+            "r_progress": float(r_progress),
+            "r_speed": float(r_speed),
+            "r_center": float(r_center),
+            "r_heading": float(r_heading),
+            "r_driving": float(r_driving),
+            "r_ctrl_mag": float(r_ctrl_mag),
+            "r_ctrl_rate": float(r_ctrl_rate),
+            "r_collision": float(r_collision),
+            "r_offroad": float(r_offroad),
+            "r_stall": float(r_stall),
+        }
 
         return float(
             r_progress

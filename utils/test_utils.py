@@ -117,7 +117,26 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
     carla_map = env.world.get_map()
     spectator = env.world.get_spectator()
 
-    results = {"speeds": [], "center_distances": [], "travel_distances": [], "rewards": []}
+    results = {
+        "speeds": [],
+        "center_distances": [],
+        "travel_distances": [],
+        "rewards": [],
+        "steer_means": [],
+        "steer_stds": [],
+        "throttle_means": [],
+        "throttle_stds": [],
+        "r_progress": [],
+        "r_speed": [],
+        "r_center": [],
+        "r_heading": [],
+        "r_driving": [],
+        "r_ctrl_mag": [],
+        "r_ctrl_rate": [],
+        "r_collision": [],
+        "r_offroad": [],
+        "r_stall": [],
+    }
     keep_showing = SHOW_RECON
 
     for ep in range(num_episodes):
@@ -127,6 +146,18 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
         prev_action  = torch.zeros(1, 2, device=DEVICE)
 
         ep_rewards, ep_speeds, ep_center_dist = [], [], []
+        ep_steers, ep_throttles = [], []
+        ep_r_progress = []
+        ep_r_speed = []
+        ep_r_center = []
+        ep_r_heading = []
+        ep_r_driving = []
+        ep_r_ctrl_mag = []
+        ep_r_ctrl_rate = []
+        ep_r_collision = []
+        ep_r_offroad = []
+        ep_r_stall = []
+
         total_dist = 0.0
         prev_loc   = env.vehicle.get_location()
         done, step = False, 0
@@ -144,12 +175,32 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
                 )
                 prev_action = action.detach()
 
+                act_np = action.detach().cpu().numpy()[0]
+                steer = float(act_np[0])
+                throttle_cmd = float((act_np[1] + 1.0) / 2.0)
+
+                ep_steers.append(steer)
+                ep_throttles.append(throttle_cmd)
+
             if keep_showing and step % SHOW_EVERY_N_STEPS == 0:
                 keep_showing = show_reconstruction_windows(
                     obs, deter, post_logits_flat, rssm, decoder
                 )
 
-            obs, reward, terminated, truncated, _ = env.step(action.detach().cpu().numpy()[0])
+            obs, reward, terminated, truncated, info = env.step(act_np)
+            rc = info.get("reward_components", {})
+
+            ep_r_progress.append(float(rc.get("r_progress", 0.0)))
+            ep_r_speed.append(float(rc.get("r_speed", 0.0)))
+            ep_r_center.append(float(rc.get("r_center", 0.0)))
+            ep_r_heading.append(float(rc.get("r_heading", 0.0)))
+            ep_r_driving.append(float(rc.get("r_driving", 0.0)))
+            ep_r_ctrl_mag.append(float(rc.get("r_ctrl_mag", 0.0)))
+            ep_r_ctrl_rate.append(float(rc.get("r_ctrl_rate", 0.0)))
+            ep_r_collision.append(float(rc.get("r_collision", 0.0)))
+            ep_r_offroad.append(float(rc.get("r_offroad", 0.0)))
+            ep_r_stall.append(float(rc.get("r_stall", 0.0)))
+            
             done = terminated or truncated
 
             curr_loc   = env.vehicle.get_location()
@@ -158,7 +209,6 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
 
             waypoint = carla_map.get_waypoint(curr_loc)
             ep_center_dist.append(curr_loc.distance(waypoint.transform.location))
-            # Fix — denormalize (* 10.0) back to m/s then convert to km/h
             ep_speeds.append(float(obs["vector"][0]) * 10.0 * 3.6)
             ep_rewards.append(float(reward))
 
@@ -171,16 +221,60 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
 
             step += 1
 
+        steer_mean = float(np.mean(ep_steers)) if ep_steers else 0.0
+        steer_std = float(np.std(ep_steers)) if ep_steers else 0.0
+        throttle_mean = float(np.mean(ep_throttles)) if ep_throttles else 0.0
+        throttle_std = float(np.std(ep_throttles)) if ep_throttles else 0.0
+
         results["speeds"].append(float(np.mean(ep_speeds)) if ep_speeds else 0.0)
         results["center_distances"].append(float(np.mean(ep_center_dist)) if ep_center_dist else 0.0)
         results["travel_distances"].append(float(total_dist))
         results["rewards"].append(float(np.mean(ep_rewards)) if ep_rewards else 0.0)
+        results["steer_means"].append(steer_mean)
+        results["steer_stds"].append(steer_std)
+        results["throttle_means"].append(throttle_mean)
+        results["throttle_stds"].append(throttle_std)
+        results["r_progress"].append(float(np.mean(ep_r_progress)) if ep_r_progress else 0.0)
+        results["r_speed"].append(float(np.mean(ep_r_speed)) if ep_r_speed else 0.0)
+        results["r_center"].append(float(np.mean(ep_r_center)) if ep_r_center else 0.0)
+        results["r_heading"].append(float(np.mean(ep_r_heading)) if ep_r_heading else 0.0)
+        results["r_driving"].append(float(np.mean(ep_r_driving)) if ep_r_driving else 0.0)
+        results["r_ctrl_mag"].append(float(np.mean(ep_r_ctrl_mag)) if ep_r_ctrl_mag else 0.0)
+        results["r_ctrl_rate"].append(float(np.mean(ep_r_ctrl_rate)) if ep_r_ctrl_rate else 0.0)
+        results["r_collision"].append(float(np.mean(ep_r_collision)) if ep_r_collision else 0.0)
+        results["r_offroad"].append(float(np.mean(ep_r_offroad)) if ep_r_offroad else 0.0)
+        results["r_stall"].append(float(np.mean(ep_r_stall)) if ep_r_stall else 0.0)
 
         print(
             f"  Ep {ep + 1} | "
             f"Dist: {total_dist:.1f}m | "
             f"Avg Speed: {np.mean(ep_speeds):.1f} km/h | "
             f"Avg Reward: {np.mean(ep_rewards):.2f}"
+        )
+        print(
+            f"     steer mean/std: {steer_mean:.3f} / {steer_std:.3f} | "
+            f"throttle mean/std: {throttle_mean:.3f} / {throttle_std:.3f}"
+        )
+        print(f"     first 20 steer: {np.round(np.array(ep_steers[:20]), 3).tolist()}")
+        print(f"     first 20 throttle: {np.round(np.array(ep_throttles[:20]), 3).tolist()}")
+        print(
+            f"     reward parts avg | "
+            f"progress: {np.mean(ep_r_progress):.3f}, "
+            f"speed: {np.mean(ep_r_speed):.3f}, "
+            f"center: {np.mean(ep_r_center):.3f}, "
+            f"heading: {np.mean(ep_r_heading):.3f}, "
+            f"driving: {np.mean(ep_r_driving):.3f}"
+        )
+        print(
+            f"     control avg     | "
+            f"ctrl_mag: {np.mean(ep_r_ctrl_mag):.3f}, "
+            f"ctrl_rate: {np.mean(ep_r_ctrl_rate):.3f}"
+        )
+        print(
+            f"     hard penalties  | "
+            f"collision: {np.mean(ep_r_collision):.3f}, "
+            f"offroad: {np.mean(ep_r_offroad):.3f}, "
+            f"stall: {np.mean(ep_r_stall):.3f}"
         )
 
     return results
