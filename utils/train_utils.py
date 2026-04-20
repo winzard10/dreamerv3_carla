@@ -12,6 +12,7 @@ from params import (
     GOAL_SCALE, VEC_SCALE,
     OVERSHOOT_K, OVERSHOOT_SCALE,
     TARGET_EMA,
+    SEM_WEIGHTS
 )
 from utils.lambda_returns import lambda_return
 from utils.twohot import symlog, symexp
@@ -380,7 +381,7 @@ def world_model_step(batch, encoder, rssm, decoder, reward_head, cont_head,
     post_recon_depth, post_sem_logits, post_goal_pred, post_vec_pred = \
         decoder(deter_flat, post_probs.reshape(B * T, -1))
 
-    post_sem_loss  = F.cross_entropy(post_sem_logits, sem_ids)
+    post_sem_loss  = F.cross_entropy(post_sem_logits, sem_ids, weight=SEM_WEIGHTS)
     post_depth_nll = gaussian_nll(depth_in, post_recon_depth).mean()
     post_goal_loss = F.mse_loss(post_goal_pred, goal_in)
     post_vec_loss  = F.mse_loss(post_vec_pred, vec_in)

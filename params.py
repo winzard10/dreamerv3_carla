@@ -5,7 +5,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Data
 BATCH_SIZE  = 4
-NUM_CLASSES = 28
+NUM_CLASSES = 23
 H, W        = 128, 128
 
 # Model dimensions — must match between train and test
@@ -41,6 +41,16 @@ OVERSHOOT_K     = 3
 OVERSHOOT_SCALE = 0.1
 GOAL_SCALE = 1.0
 VEC_SCALE  = 0.01        # velocity vector loss scale
+
+# HARDCODED SEM WEIGHTS
+IDX_important = torch.tensor([4,6,10,12,18], dtype=torch.long)
+IDX_important = IDX_important[IDX_important < NUM_CLASSES]
+SEM_WEIGHTS = torch.ones(NUM_CLASSES, device=DEVICE)
+SEM_WEIGHTS[IDX_important] = 10
+SEM_WEIGHTS = SEM_WEIGHTS / torch.sum(SEM_WEIGHTS)
+# NOTE: indicies definitions are from 0.9.15
+# importatn indicies: 
+# Pedestrain=4, RoadLine=6, Vehicles=10, TrafficSign=12, TrafficLight=18
 
 # TwoHot reward distribution
 BINS = 255
