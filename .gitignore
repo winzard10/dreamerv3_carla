@@ -19,4 +19,6 @@ runs/
 plots/
 
 # Ignore custom batch commands
-*.cmd
+*.cmdsaved_checkpoints/
+checkpoints/
+*.pth
