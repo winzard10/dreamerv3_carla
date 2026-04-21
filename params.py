@@ -65,9 +65,9 @@ FIXED_VAL_ENABLED         = True
 # =============================================================================
 # Evaluation / Test
 # =============================================================================
-TEST_MODEL         = "dreamerv3_latest.pth"
+TEST_MODEL         = "dreamerv3_ep4800.pth"
 TEST_TOWN          = "Town10HD"
-TEST_NUM_EPISODES  = 20 
+TEST_NUM_EPISODES  = 10 
 SHOW_RECON         = True
 SHOW_SPECTATOR     = True
 SHOW_EVERY_N_STEPS = 3
