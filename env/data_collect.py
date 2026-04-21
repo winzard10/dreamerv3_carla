@@ -57,8 +57,7 @@ def save_sequence(seq: dict, save_dir: str):
     seq_idx = int(time.time() * 1000)
     np.savez_compressed(
         f"{save_dir}/seq_{seq_idx}.npz",
-        depth    = np.array(seq["depth"]),
-        semantic = np.array(seq["semantic"]),
+        rgb      = np.array(seq["rgb"]),
         goal     = np.array(seq["goal"]),
         vector   = np.array(seq["vector"]),
         action   = np.array(seq["action"]),
@@ -69,7 +68,7 @@ def save_sequence(seq: dict, save_dir: str):
 
 def empty_seq() -> dict:
     return {
-        "depth": [], "semantic": [], "goal": [], "vector": [],
+        "rgb": [], "goal": [], "vector": [],
         "action": [], "reward": [], "done": [],
     }
 
@@ -90,8 +89,7 @@ def run_collection():
           f"({COLLECT_LOOKAHEAD * 2.0:.1f}m ahead)")
     print(f"  MAX_EPISODE_STEPS: {MAX_EPISODE_STEPS} "
           f"({MAX_EPISODE_STEPS * 0.05:.0f}s per episode)")
-    print(f"  depth shape:    {obs['depth'].shape}")
-    print(f"  semantic shape: {obs['semantic'].shape}")
+    print(f"  rgb shape:      {obs['rgb'].shape}")
     print(f"  goal shape:     {obs['goal'].shape}  (normalized /10.0)")
     print(f"  vector shape:   {obs['vector'].shape} (normalized /10.0)")
 
@@ -124,8 +122,7 @@ def run_collection():
         done_for_buffer = natural_done  # NOT time_limit_hit
 
         # Accumulate transition — obs from BEFORE the step
-        seq["depth"].append(obs["depth"])
-        seq["semantic"].append(obs["semantic"])
+        seq["rgb"].append(obs["rgb"])
         seq["goal"].append(obs["goal"])
         seq["vector"].append(obs["vector"])
         seq["action"].append(action)

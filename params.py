@@ -22,6 +22,7 @@ PHASE_A_PATH  = "checkpoints/world_model/world_model_pretrained.pth"
 # Phase B
 PHASE_B_STEPS  = 2000
 PART_B_EPISODE = 5000
+
 TRAIN_EVERY    = 5
 IMAG_HORIZON   = 8 # 15
 GAMMA          = 0.97 # 0.99
@@ -65,7 +66,7 @@ FIXED_VAL_ENABLED         = True
 # =============================================================================
 # Evaluation / Test
 # =============================================================================
-TEST_MODEL         = "dreamerv3_ep4800.pth"
+TEST_MODEL         = "dreamerv3_latest.pth"
 TEST_TOWN          = "Town10HD"
 TEST_NUM_EPISODES  = 10 
 SHOW_RECON         = True

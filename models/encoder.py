@@ -16,23 +16,23 @@ class ConvBlock(nn.Module):
         return self.block(x)
 
 
-class MultiModalEncoder(nn.Module):
-    def __init__(self, embed_dim=1024, num_classes=28, sem_embed_dim=16):
+class RGBEncoder(nn.Module):
+    """
+    Baseline encoder:
+      rgb   : [B, 3, 128, 128]
+      vector: [B, 3]
+      goal  : [B, 2]
+
+    Output:
+      embed : [B, embed_dim]
+    """
+    def __init__(self, embed_dim=1024):
         super().__init__()
 
-        self.sem_embed = nn.Embedding(num_classes, sem_embed_dim)
-
-        self.depth_stem = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
+        self.rgb_stem = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),
             nn.ELU(),
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
-            nn.ELU(),
-        )
-
-        self.sem_stem = nn.Sequential(
-            nn.Conv2d(sem_embed_dim, 16, kernel_size=3, stride=1, padding=1),
-            nn.ELU(),
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
             nn.ELU(),
         )
 
@@ -59,27 +59,17 @@ class MultiModalEncoder(nn.Module):
             nn.ELU(),
         )
 
-    def forward(self, depth, sem_ids, vector, goal):
-        if sem_ids.dim() == 4:
-            sem_ids = sem_ids.squeeze(1)
-        sem_ids = sem_ids.long()
+    def forward(self, rgb, vector, goal):
+        rgb_feat = self.rgb_stem(rgb)
 
-        sem_emb = self.sem_embed(sem_ids)
-        sem_emb = sem_emb.permute(0, 3, 1, 2)
-
-        depth_feat = self.depth_stem(depth)
-        sem_feat = self.sem_stem(sem_emb)
-
-        x = torch.cat([depth_feat, sem_feat], dim=1)
-
-        x64 = self.stage1(x)
+        x64 = self.stage1(rgb_feat)
         x32 = self.stage2(x64)
         x16 = self.stage3(x32)
-        x8 = self.stage4(x16)
+        x8  = self.stage4(x16)
 
         vision_features = self.flatten(x8)
         vector_features = self.vector_fc(vector)
-        goal_features = self.goal_fc(goal)
+        goal_features   = self.goal_fc(goal)
 
         fused = torch.cat([vision_features, vector_features, goal_features], dim=1)
         embed = self.fusion(fused)

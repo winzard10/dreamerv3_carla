@@ -31,21 +31,20 @@ class CarlaEnv(gym.Env):
         self.prev_action = None
 
         self.observation_space = spaces.Dict({
-            "depth":    spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
-            "semantic": spaces.Box(low=0, high=255, shape=(128, 128, 1), dtype=np.uint8),
-            "vector":   spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
-            "goal":     spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
+            "rgb":    spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8),
+            "vector": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
+            "goal":   spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
         })
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
 
         self.vehicle = None
         self.sensors = []
-        self.last_data = {"depth": None, "semantic": None}
+        self.last_data = {"rgb": None}
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._cleanup()
-        self.last_data = {"depth": None, "semantic": None}
+        self.last_data = {"rgb": None}
         time.sleep(1.0)
         self.stuck_ticks = 0
         self.waypoint_reward = 0.0
@@ -82,7 +81,7 @@ class CarlaEnv(gym.Env):
 
         max_tries = 100
         tries = 0
-        while (self.last_data["depth"] is None or self.last_data["semantic"] is None) and tries < max_tries:
+        while self.last_data["rgb"] is None and tries < max_tries:
             self.world.tick()
             tries += 1
 
@@ -181,11 +180,6 @@ class CarlaEnv(gym.Env):
     def _get_obs(self):
         player_transform = self.vehicle.get_transform()
 
-        # Goal: dx/dy to a waypoint GOAL_LOOKAHEAD steps ahead.
-        # This is close enough (6m) to follow road curvature correctly,
-        # while still giving the actor a forward-looking direction signal.
-        # The car doesn't need to explicitly reach this waypoint —
-        # it gets reward by passing through intermediate 2m waypoints.
         goal_idx = min(
             self.current_waypoint_index + GOAL_LOOKAHEAD,
             len(self.route_waypoints) - 1
@@ -200,13 +194,8 @@ class CarlaEnv(gym.Env):
         speed_ms = np.sqrt(v.x**2 + v.y**2 + v.z**2)
 
         return {
-            "depth":    self.last_data["depth"],
-            "semantic": self.last_data["semantic"],
-            # Normalized: speed in [0, ~1] for typical driving speeds
+            "rgb":      self.last_data["rgb"],
             "vector":   np.array([speed_ms / 10.0, 0, 0], dtype=np.float32),
-            # Normalized: raw dx/dy in meters / 10.0
-            # With GOAL_LOOKAHEAD=3 and 2m spacing, raw values are ~0-6m
-            # After /10.0 they are ~0-0.6 — well scaled for the network
             "goal":     (local_goal / 10.0).astype(np.float32),
         }
 
@@ -362,22 +351,14 @@ class CarlaEnv(gym.Env):
         return False
 
     def _setup_sensors(self):
-        depth_bp = self.blueprint_library.find('sensor.camera.depth')
-        depth_bp.set_attribute('image_size_x', '128')
-        depth_bp.set_attribute('image_size_y', '128')
-
-        sem_bp = self.blueprint_library.find('sensor.camera.semantic_segmentation')
-        sem_bp.set_attribute('image_size_x', '128')
-        sem_bp.set_attribute('image_size_y', '128')
+        rgb_bp = self.blueprint_library.find('sensor.camera.rgb')
+        rgb_bp.set_attribute('image_size_x', '128')
+        rgb_bp.set_attribute('image_size_y', '128')
 
         transform = carla.Transform(carla.Location(x=1.6, z=1.7))
-        self.depth_sensor = self.world.spawn_actor(depth_bp, transform, attach_to=self.vehicle)
-        self.sem_sensor   = self.world.spawn_actor(sem_bp,   transform, attach_to=self.vehicle)
-
-        self.depth_sensor.listen(lambda image: self._process_depth(image))
-        self.sem_sensor.listen(lambda image: self._process_sem(image))
-
-        self.sensors.extend([self.depth_sensor, self.sem_sensor])
+        self.rgb_sensor = self.world.spawn_actor(rgb_bp, transform, attach_to=self.vehicle)
+        self.rgb_sensor.listen(lambda image: self._process_rgb(image))
+        self.sensors.append(self.rgb_sensor)
 
         col_bp = self.blueprint_library.find('sensor.other.collision')
         self.col_sensor = self.world.spawn_actor(col_bp, carla.Transform(), attach_to=self.vehicle)
@@ -400,17 +381,10 @@ class CarlaEnv(gym.Env):
     def _on_collision(self, event):
         self.collision_hist.append(event)
 
-    def _process_depth(self, image):
-        image.convert(carla.ColorConverter.LogarithmicDepth)
+    def _process_rgb(self, image):
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
         array = np.reshape(array, (image.height, image.width, 4))
-        self.last_data["depth"] = array[:, :, 0:1]
-
-    def _process_sem(self, image):
-        image.convert(carla.ColorConverter.Raw)
-        array = np.frombuffer(image.raw_data, dtype=np.uint8)
-        array = np.reshape(array, (image.height, image.width, 4))
-        self.last_data["semantic"] = array[:, :, 2:3]
+        self.last_data["rgb"] = array[:, :, :3][:, :, ::-1].copy()
 
     def _cleanup(self):
         for s in self.sensors:

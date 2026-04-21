@@ -18,9 +18,9 @@ from utils.train_utils import (
 from utils.buffer import SequenceBuffer
 from utils.twohot import TwoHotDist
 
-from models.encoder import MultiModalEncoder
+from models.encoder import RGBEncoder
 from models.rssm import RSSM
-from models.decoder import MultiModalDecoder
+from models.decoder import RGBDecoder
 from models.rewardhead import RewardHead
 from models.continuehead import ContinueHead
 from models.actor_critic import Actor, Critic
@@ -49,7 +49,7 @@ def main():
     # ------------------------------------------------------------------
     # Models
     # ------------------------------------------------------------------
-    encoder = MultiModalEncoder(embed_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
+    encoder = RGBEncoder(embed_dim=EMBED_DIM).to(DEVICE)
 
     rssm = RSSM(
         deter_dim=DETER_DIM, act_dim=2, embed_dim=EMBED_DIM, goal_dim=2,
@@ -57,8 +57,11 @@ def main():
         unimix_ratio=0.01, kl_balance=0.8, free_nats=FREE_NATS,
     ).to(DEVICE)
 
-    Z_DIM   = rssm.stoch_dim
-    decoder = MultiModalDecoder(deter_dim=DETER_DIM, stoch_dim=Z_DIM, num_classes=NUM_CLASSES).to(DEVICE)
+    Z_DIM = rssm.stoch_dim
+    decoder = RGBDecoder(
+        deter_dim=DETER_DIM,
+        stoch_dim=Z_DIM,
+    ).to(DEVICE)
 
     reward_head = RewardHead(deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2,
                           hidden_dim=512, bins=BINS).to(DEVICE)
@@ -179,13 +182,14 @@ def main():
         for step in pbar_steps:
             # Environment interaction
             with torch.no_grad():
-                depth_in = torch.as_tensor(obs["depth"].copy()).permute(2,0,1).unsqueeze(0).float().to(DEVICE) / 255.0
-                sem_ids  = torch.as_tensor(obs["semantic"].copy()).permute(2,0,1).unsqueeze(0).long().to(DEVICE).clamp(0, NUM_CLASSES-1)
-                vec_in   = torch.as_tensor(obs.get("vector", np.zeros(3)).copy()).unsqueeze(0).float().to(DEVICE)
-                goal_in  = torch.as_tensor(obs.get("goal", np.zeros(2)).copy()).unsqueeze(0).float().to(DEVICE)
+                rgb_in = torch.as_tensor(obs["rgb"].copy()).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE) / 255.0
+                vec_in = torch.as_tensor(obs.get("vector", np.zeros(3)).copy()).unsqueeze(0).float().to(DEVICE)
+                goal_in = torch.as_tensor(obs.get("goal", np.zeros(2)).copy()).unsqueeze(0).float().to(DEVICE)
 
-                embed = encoder(depth_in, sem_ids, vec_in, goal_in)
-                prev_deter, prev_stoch, _, _ = rssm.obs_step(prev_deter, prev_stoch, prev_action, embed, goal_in)
+                embed = encoder(rgb_in, vec_in, goal_in)
+                prev_deter, prev_stoch, _, _ = rssm.obs_step(
+                    prev_deter, prev_stoch, prev_action, embed, goal_in
+                )
                 action_th, _, _, _ = actor(
                     prev_deter, rssm.flatten_stoch(prev_stoch), goal_in, sample=True
                 )
@@ -200,9 +204,14 @@ def main():
                 v_t.rotation
             ))
 
-            buffer.add(obs["depth"], obs["semantic"],
-                       obs.get("vector", np.zeros(3)), obs.get("goal", np.zeros(2)),
-                       act_np, reward, done)
+            buffer.add(
+                obs["rgb"],
+                obs.get("vector", np.zeros(3, dtype=np.float32)),
+                obs.get("goal", np.zeros(2, dtype=np.float32)),
+                act_np,
+                reward,
+                done,
+            )
 
             episode_reward += reward
             obs         = next_obs
@@ -210,7 +219,7 @@ def main():
             global_step += 1
 
             # Model updates
-            if global_step % TRAIN_EVERY == 0 and buffer.idx > BATCH_SIZE:
+            if global_step % TRAIN_EVERY == 0 and (buffer.full or buffer.idx >= BATCH_SIZE):
                 batch = buffer.sample(BATCH_SIZE)
                 if batch is None:
                     continue

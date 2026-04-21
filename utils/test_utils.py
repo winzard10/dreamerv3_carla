@@ -1,14 +1,13 @@
-# utils/test_utils.py
 import numpy as np
 import cv2
 import torch
 import carla
 
 from params import *
-from models.encoder import MultiModalEncoder
+from models.encoder import RGBEncoder
 from models.rssm import RSSM
 from models.actor_critic import Actor
-from models.decoder import MultiModalDecoder
+from models.decoder import RGBDecoder
 
 DETAILED_LOGGING = True
 
@@ -16,17 +15,9 @@ DETAILED_LOGGING = True
 # Visualization
 # =============================================================================
 
-def colorize_segmentation(seg_ids: np.ndarray, num_classes: int = NUM_CLASSES) -> np.ndarray:
-    rng    = np.random.default_rng(0)
-    colors = rng.integers(0, 255, size=(num_classes, 3), dtype=np.uint8)
-    colors[0] = np.array([0, 0, 0], dtype=np.uint8)
-    seg_ids = np.clip(seg_ids, 0, num_classes - 1)
-    return colors[seg_ids]
-
-
 def show_reconstruction_windows(obs, deter, post_logits_flat, rssm, decoder) -> bool:
     """
-    Renders GT vs reconstructed depth and semantic side-by-side.
+    Renders GT vs reconstructed RGB side-by-side.
     Uses SOFT posterior probabilities for decoding visualization.
     Returns False if the user pressed 'q'.
     """
@@ -34,22 +25,19 @@ def show_reconstruction_windows(obs, deter, post_logits_flat, rssm, decoder) -> 
         _, post_probs, _ = rssm.dist_from_logits_flat(post_logits_flat)
         stoch_soft_flat = post_probs.reshape(post_probs.shape[0], -1)
 
-        recon_depth, recon_segm_logits, _, _ = decoder(deter, stoch_soft_flat)
+        recon_rgb, _, _ = decoder(deter, stoch_soft_flat)
 
-    gt_depth = obs["depth"][:, :, 0].astype(np.uint8)
-    gt_segm  = obs["semantic"][:, :, 0].astype(np.uint8)
+    gt_rgb = obs["rgb"].astype(np.uint8)
+    recon_rgb_np = (
+        recon_rgb[0].detach().cpu().permute(1, 2, 0).numpy() * 255.0
+    ).clip(0, 255).astype(np.uint8)
 
-    recon_depth_np = (recon_depth[0, 0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-    recon_segm_ids = torch.argmax(recon_segm_logits, dim=1)[0].cpu().numpy().astype(np.uint8)
+    rgb_vis = np.concatenate([gt_rgb, recon_rgb_np], axis=1)
 
-    depth_vis    = np.concatenate([gt_depth, recon_depth_np], axis=1)
-    segm_vis     = np.concatenate([colorize_segmentation(gt_segm), colorize_segmentation(recon_segm_ids)], axis=1)
-    segm_vis_bgr = cv2.cvtColor(segm_vis, cv2.COLOR_RGB2BGR)
-
-    cv2.imshow("Depth (GT | Recon)", depth_vis)
-    cv2.imshow("Semantic (GT | Recon)", segm_vis_bgr)
+    cv2.imshow("RGB (GT | Recon)", cv2.cvtColor(rgb_vis, cv2.COLOR_RGB2BGR))
 
     return (cv2.waitKey(1) & 0xFF) != ord("q")
+
 
 # =============================================================================
 # Model loading
@@ -60,17 +48,20 @@ def build_models(model_dir: str = CKPT_DIR, model_name: str = TEST_MODEL):
     print(f"Loading models from {model_path}...")
     Z_DIM = STOCH_CATEGORICALS * STOCH_CLASSES
 
-    encoder = MultiModalEncoder(embed_dim=EMBED_DIM, num_classes=NUM_CLASSES, sem_embed_dim=16).to(DEVICE)
-    rssm    = RSSM(
+    encoder = RGBEncoder(embed_dim=EMBED_DIM).to(DEVICE)
+    rssm = RSSM(
         deter_dim=DETER_DIM, act_dim=2, embed_dim=EMBED_DIM, goal_dim=2,
         stoch_categoricals=STOCH_CATEGORICALS, stoch_classes=STOCH_CLASSES,
         unimix_ratio=0.01, kl_balance=0.8, free_nats=FREE_NATS,
     ).to(DEVICE)
-    actor   = Actor(
+    actor = Actor(
         deter_dim=DETER_DIM, stoch_dim=Z_DIM, goal_dim=2, action_dim=2,
         hidden_dim=512, min_std=0.1, init_std=1.0,
     ).to(DEVICE)
-    decoder = MultiModalDecoder(deter_dim=DETER_DIM, stoch_dim=Z_DIM, num_classes=NUM_CLASSES).to(DEVICE)
+    decoder = RGBDecoder(
+        deter_dim=DETER_DIM,
+        stoch_dim=Z_DIM,
+    ).to(DEVICE)
 
     ckpt = torch.load(model_path, map_location=DEVICE, weights_only=False)
     encoder.load_state_dict(ckpt["encoder"])
@@ -89,21 +80,20 @@ def build_models(model_dir: str = CKPT_DIR, model_name: str = TEST_MODEL):
 # =============================================================================
 
 def preprocess_obs(obs):
-    depth = (
-        torch.as_tensor(obs["depth"].copy())
+    rgb = (
+        torch.as_tensor(obs["rgb"].copy())
         .permute(2, 0, 1).unsqueeze(0).float().to(DEVICE) / 255.0
-    )  # [1, 1, H, W]
+    )  # [1, 3, H, W]
 
-    sem = (
-        torch.as_tensor(obs["semantic"].copy())
-        .permute(2, 0, 1).unsqueeze(0).long().to(DEVICE)
-        .clamp(0, NUM_CLASSES - 1)
-    )  # [1, 1, H, W]
+    vec = torch.as_tensor(
+        obs.get("vector", np.zeros(3, dtype=np.float32)).copy()
+    ).unsqueeze(0).float().to(DEVICE)
 
-    vec  = torch.as_tensor(obs.get("vector", np.zeros(3, dtype=np.float32)).copy()).unsqueeze(0).float().to(DEVICE)
-    goal = torch.as_tensor(obs.get("goal",   np.zeros(2, dtype=np.float32)).copy()).unsqueeze(0).float().to(DEVICE)
+    goal = torch.as_tensor(
+        obs.get("goal", np.zeros(2, dtype=np.float32)).copy()
+    ).unsqueeze(0).float().to(DEVICE)
 
-    return depth, sem, vec, goal
+    return rgb, vec, goal
 
 
 # =============================================================================
@@ -146,7 +136,7 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
         obs, _ = env.reset()
 
         deter, stoch = rssm.initial(1, device=DEVICE)
-        prev_action  = torch.zeros(1, 2, device=DEVICE)
+        prev_action = torch.zeros(1, 2, device=DEVICE)
 
         ep_rewards, ep_speeds, ep_center_dist = [], [], []
         ep_steers, ep_throttles = [], []
@@ -164,13 +154,13 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
         ep_collision_count = 0
 
         total_dist = 0.0
-        prev_loc   = env.vehicle.get_location()
+        prev_loc = env.vehicle.get_location()
         done, step = False, 0
 
         while not done:
             with torch.no_grad():
-                depth, sem, vec, goal = preprocess_obs(obs)
-                embed = encoder(depth, sem, vec, goal)
+                rgb, vec, goal = preprocess_obs(obs)
+                embed = encoder(rgb, vec, goal)
 
                 deter, stoch, post_logits_flat, _ = rssm.obs_step(
                     deter, stoch, prev_action, embed, goal
@@ -194,7 +184,7 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
 
             obs, reward, terminated, truncated, info = env.step(act_np)
             rc = info.get("reward_components", {})
-            
+
             ep_collision_count += (1 if rc.get("r_collision", 0.0) < 0 else 0)
 
             ep_r_progress.append(float(rc.get("r_progress", 0.0)))
@@ -208,12 +198,12 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
             ep_r_offroad.append(float(rc.get("r_offroad", 0.0)))
             ep_r_stall.append(float(rc.get("r_stall", 0.0)))
             ep_lane_invasions.append(info.get("lane_invasions", 0))
-            
+
             done = terminated or truncated
 
-            curr_loc   = env.vehicle.get_location()
+            curr_loc = env.vehicle.get_location()
             total_dist += curr_loc.distance(prev_loc)
-            prev_loc   = curr_loc
+            prev_loc = curr_loc
 
             waypoint = carla_map.get_waypoint(curr_loc)
             ep_center_dist.append(curr_loc.distance(waypoint.transform.location))
@@ -253,7 +243,7 @@ def run_evaluation(env, encoder, rssm, actor, decoder,
         results["r_offroad"].append(float(np.mean(ep_r_offroad)) if ep_r_offroad else 0.0)
         results["r_stall"].append(float(np.mean(ep_r_stall)) if ep_r_stall else 0.0)
         results["lane_invasions"].append(ep_lane_invasions[-1] if ep_lane_invasions else 0)
-        
+
         coll_per_m = ep_collision_count / (total_dist + 1e-6)
         results["coll_per_meter"].append(coll_per_m)
 
