@@ -12,7 +12,7 @@ __pycache__/
 
 # Ignore large data/logs
 logs/
-data/
+# data/
 docs/
 checkpoints/
 runs/
@@ -22,3 +22,4 @@ plots/
 *.cmdsaved_checkpoints/
 checkpoints/
 *.pth
+*.cmd
