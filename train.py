@@ -210,7 +210,7 @@ def main():
             global_step += 1
 
             # Model updates
-            if global_step % TRAIN_EVERY == 0 and buffer.idx > BATCH_SIZE:
+            if global_step % TRAIN_EVERY == 0 and (buffer.full or buffer.idx >= BATCH_SIZE):
                 batch = buffer.sample(BATCH_SIZE)
                 if batch is None:
                     continue
